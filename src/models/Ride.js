@@ -67,7 +67,15 @@ const rideSchema = new mongoose.Schema(
       default: 1,
     },
 
+    rideType: {
+      type: String,
+      enum: ["private", "shared"],
+      default: "private"
+    },
+
     vehicleCapacity: { type: Number },
+
+    estimatedETA: { type: Number, default: 0 },
 
     estimatedFare: {
       type: Number,
@@ -81,10 +89,6 @@ const rideSchema = new mongoose.Schema(
     fare: {
       type: Number,
       default: 0,
-    },
-
-    rideStartTime: {
-      type: Date,
     },
 
     rideStartTime: {

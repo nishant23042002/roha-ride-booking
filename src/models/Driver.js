@@ -20,6 +20,12 @@ const driverSchema = new mongoose.Schema(
       required: true,
     },
 
+    vehicleCapacity: {
+      type: Number,
+      default: 1
+    },
+
+
     vehicleNumber: {
       type: String,
       required: true,

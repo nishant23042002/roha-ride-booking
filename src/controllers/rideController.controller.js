@@ -1,8 +1,9 @@
 import Ride from "../models/Ride.js";
 import Driver from "../models/Driver.js";
 import { getIO, onlineDrivers } from "../socket/index.js";
-import { calculateDistance } from "../utils/distance.js";
-import { pricing } from "../config/pricing.js";
+import { calculateETA } from "../utils/eta.js";
+import { calculateFare } from "../services/pricingEngine.js";
+import { vehicleRules } from "../config/vehicleRules.js";
 
 // 🔴 Create Ride Request
 export const requestRide = async (req, res) => {
@@ -14,6 +15,9 @@ export const requestRide = async (req, res) => {
       dropLongitude,
       dropLatitude,
       vehicleType,
+      demandMultiplier,
+      passengerCount = 1,
+      rideType = "private",
     } = req.body;
 
     if (!vehicleType) {
@@ -22,28 +26,44 @@ export const requestRide = async (req, res) => {
       });
     }
 
-    const distance = calculateDistance(
-      pickupLatitude,
-      pickupLongitude,
-      dropLatitude,
-      dropLongitude,
-    );
+    const rule = vehicleRules[vehicleType];
 
-    // For estimate, assume default vehicle type (or nearest driver vehicle)
-
-    const vehiclePricing = pricing[vehicleType];
-    if (!vehiclePricing) {
+    if (!rule) {
       return res.status(400).json({
         message: "Invalid vehicle type",
       });
     }
 
-    const estimatedFare =
-      vehiclePricing.baseFare + distance * vehiclePricing.perKm;
+    if (passengerCount < 1 || passengerCount > rule.maxPassengers) {
+      return res.status(400).json({
+        message: `Maximum ${rule.maxPassengers} passengers allowed for ${vehicleType}`,
+      });
+    }
+
+    if (!["private", "shared"].includes(rideType)) {
+      return res.status(400).json({
+        message: "Invalid ride type",
+      });
+    }
+
+    const fareResult = calculateFare({
+      vehicleType,
+      pickupLat: pickupLatitude,
+      pickupLon: pickupLongitude,
+      dropLat: dropLatitude,
+      dropLon: dropLongitude,
+      demandMultiplier,
+      passengerCount,
+      rideType,
+    });
+
+    const estimatedETA = calculateETA(fareResult.distanceKm, vehicleType);
 
     const ride = await Ride.create({
       customer: customerId,
       vehicleType,
+      passengerCount,
+      rideType,
       pickupLocation: {
         type: "Point",
         coordinates: [pickupLongitude, pickupLatitude],
@@ -52,14 +72,18 @@ export const requestRide = async (req, res) => {
         type: "Point",
         coordinates: [dropLongitude, dropLatitude],
       },
-      estimatedDistanceKm: Number(distance.toFixed(2)),
-      estimatedFare: Number(estimatedFare.toFixed(2)),
+      estimatedETA,
+      estimatedDistanceKm: fareResult.distanceKm,
+      estimatedFare: fareResult.finalFare,
     });
+    console.log("Passenger count:", passengerCount);
+    console.log("Vehicle type:", vehicleType);
 
     // 🔎 Find nearest available driver within 5km
     const nearestDriver = await Driver.find({
       isAvailable: true,
       activeRide: null,
+      vehicleCapacity: { $gte: passengerCount },
       vehicleType,
       currentLocation: {
         $near: {

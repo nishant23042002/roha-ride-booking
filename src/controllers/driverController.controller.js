@@ -18,11 +18,19 @@ export const registerDriver = async (req, res) => {
       return res.status(400).json({ message: "Driver already registered" });
     }
 
+    const rule = vehicleRules[vehicleType];
+
+    if (!rule) {
+      return res.status(400).json({ message: "Invalid vehicle type" });
+    }
+
     const driver = await Driver.create({
       user: userId,
       vehicleType,
+      vehicleCapacity: rule.maxPassengers,
       vehicleNumber,
       licenseNumber,
+      isAvailable: false
     });
 
     res.status(201).json({

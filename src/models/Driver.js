@@ -30,6 +30,36 @@ const driverSchema = new mongoose.Schema(
       required: true,
     },
 
+    tierLevel: {
+      type: Number,
+      default: 1
+    },
+
+    tierName: {
+      type: String,
+      default: "Bronze"
+    },
+
+    totalTrips: {
+      type: Number,
+      default: 0,
+    },
+
+    totalEarnings: {
+      type: Number,
+      default: 0,
+    },
+
+    totalDistanceKm: {
+      type: Number,
+      default: 0,
+    },
+
+    walletBalance: {
+      type: Number,
+      default: 0,
+    },
+
     isAvailable: {
       type: Boolean,
       default: false,

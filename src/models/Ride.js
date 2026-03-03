@@ -69,6 +69,15 @@ const rideSchema = new mongoose.Schema(
 
     vehicleCapacity: { type: Number },
 
+    estimatedFare: {
+      type: Number,
+      default: 0,
+    },
+    estimatedDistanceKm: {
+      type: Number,
+      default: 0,
+    },
+
     fare: {
       type: Number,
       default: 0,
@@ -88,6 +97,16 @@ const rideSchema = new mongoose.Schema(
     },
 
     rideDurationMinutes: {
+      type: Number,
+      default: 0,
+    },
+
+    platformCommission: {
+      type: Number,
+      default: 0,
+    },
+
+    driverEarning: {
       type: Number,
       default: 0,
     },

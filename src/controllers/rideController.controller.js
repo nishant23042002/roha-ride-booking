@@ -1,6 +1,8 @@
 import Ride from "../models/Ride.js";
 import Driver from "../models/Driver.js";
 import { getIO, onlineDrivers } from "../socket/index.js";
+import { calculateDistance } from "../utils/distance.js";
+import { pricing } from "../config/pricing.js";
 
 // 🔴 Create Ride Request
 export const requestRide = async (req, res) => {
@@ -11,10 +13,37 @@ export const requestRide = async (req, res) => {
       pickupLatitude,
       dropLongitude,
       dropLatitude,
+      vehicleType,
     } = req.body;
+
+    if (!vehicleType) {
+      return res.status(400).json({
+        message: "Vehicle type is required",
+      });
+    }
+
+    const distance = calculateDistance(
+      pickupLatitude,
+      pickupLongitude,
+      dropLatitude,
+      dropLongitude,
+    );
+
+    // For estimate, assume default vehicle type (or nearest driver vehicle)
+
+    const vehiclePricing = pricing[vehicleType];
+    if (!vehiclePricing) {
+      return res.status(400).json({
+        message: "Invalid vehicle type",
+      });
+    }
+
+    const estimatedFare =
+      vehiclePricing.baseFare + distance * vehiclePricing.perKm;
 
     const ride = await Ride.create({
       customer: customerId,
+      vehicleType,
       pickupLocation: {
         type: "Point",
         coordinates: [pickupLongitude, pickupLatitude],
@@ -23,12 +52,15 @@ export const requestRide = async (req, res) => {
         type: "Point",
         coordinates: [dropLongitude, dropLatitude],
       },
+      estimatedDistanceKm: Number(distance.toFixed(2)),
+      estimatedFare: Number(estimatedFare.toFixed(2)),
     });
 
     // 🔎 Find nearest available driver within 5km
     const nearestDriver = await Driver.find({
       isAvailable: true,
       activeRide: null,
+      vehicleType,
       currentLocation: {
         $near: {
           $geometry: {
@@ -63,7 +95,6 @@ export const requestRide = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 
 // 🔴 Update Ride Status
 export const updateRideStatus = async (req, res) => {
@@ -109,7 +140,7 @@ export const updateRideStatus = async (req, res) => {
       if (status === "completed" || status === "cancelled") {
         await Driver.findByIdAndUpdate(ride.driver, {
           isAvailable: true,
-          activeRide: null
+          activeRide: null,
         });
       }
     }

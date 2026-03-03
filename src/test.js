@@ -3,7 +3,7 @@ import { io } from "socket.io-client";
 
 const socket = io("http://localhost:5000");
 
-const DRIVER_ID = "69a60ec8015c1eb4fb516489";
+const DRIVER_ID = "69a63341a2b26dbedac87ed0";
 
 socket.on("connect", () => {
   console.log("Connected:", socket.id);
@@ -12,7 +12,6 @@ socket.on("connect", () => {
 
 socket.on("new-ride", async (ride) => {
   console.log("New ride received:", ride._id);
-  
 
   // simulate driver clicking accept
   socket.emit("accept-ride", {
@@ -60,4 +59,10 @@ socket.on("ride-error", (msg) => {
 
 socket.on("ride-taken", (rideId) => {
   console.log("Ride taken by someone else:", rideId);
+});
+
+socket.on("tier-upgraded", (data) => {
+  console.log("🔥 TIER UPGRADED!");
+  console.log("New Tier:", data.newTier);
+  console.log("New Commission:", data.commissionPercent + "%");
 });

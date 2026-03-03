@@ -5,6 +5,7 @@ import { getIO, onlineDrivers, onlineCustomers } from "./index.js";
 import Driver from "../models/Driver.js";
 import { calculateDistance } from "../utils/distance.js";
 import { pricing } from "../config/pricing.js";
+import { driverTiers } from "../config/driverTier.js";
 
 export default function registerRideHandlers(socket) {
   socket.on("register-customer", (customerId) => {
@@ -174,13 +175,62 @@ export default function registerRideHandlers(socket) {
       // Round to 2 decimals
       ride.fare = Number(fare.toFixed(2));
 
+      // 🏆 TIER BASED COMMISSION LOGIC
+
+      // Determine correct tier based on totalTrips
+      const tier = driverTiers
+        .slice()
+        .reverse()
+        .find((t) => (driver.totalTrips || 0) >= t.minRides);
+
+      // Enforce minimum commission floor (12%)
+      const commissionPercent = Math.max(tier.commission, 12);
+      // Calculate commission
+      const commission = (ride.fare * commissionPercent) / 100;
+
+      const driverEarning = ride.fare - commission;
+
+      // Save to ride
+      ride.platformCommission = Number(commission.toFixed(2));
+      ride.driverEarning = Number(driverEarning.toFixed(2));
       await ride.save();
 
       // 🔓 Unlock driver
       await Driver.findByIdAndUpdate(driverId, {
         isAvailable: true,
         activeRide: null,
+        $inc: {
+          totalTrips: 1,
+          totalEarnings: driverEarning,
+          totalDistanceKm: ride.rideDistanceKm,
+          walletBalance: driverEarning,
+        },
       });
+
+      // 🆙 AUTO TIER UPGRADE
+      const updatedDriver = await Driver.findById(driverId);
+
+      const newTier = driverTiers
+        .slice()
+        .reverse()
+        .find((t) => (updatedDriver.totalTrips || 0) >= t.minRides);
+
+      if (updatedDriver.tierLevel !== newTier.level) {
+        updatedDriver.tierLevel = newTier.level;
+        updatedDriver.tierName = newTier.name;
+        await updatedDriver.save();
+
+        const driverSocketId = onlineDrivers.get(driverId.toString());
+
+        if (driverSocketId) {
+          io.to(driverSocketId).emit("tier-upgraded", {
+            newTier: newTier.name,
+            commissionPercent,
+          });
+        }
+
+        console.log(`Driver upgraded to ${newTier.name} Tier`);
+      }
 
       const io = getIO();
       const customerSocketId = onlineCustomers.get(ride.customer.toString());
@@ -191,7 +241,9 @@ export default function registerRideHandlers(socket) {
 
       // notify driver
       socket.emit("ride-completed", ride);
-      console.log("RIDE FAIR: ", ride.fare);
+      console.log(
+        `Ride completed. Tier: ${newTier.name}, Commission: ${commissionPercent}%`,
+      );
 
       console.log("Ride completed:", rideId);
     } catch (error) {

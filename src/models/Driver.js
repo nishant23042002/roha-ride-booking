@@ -16,15 +16,19 @@ const driverSchema = new mongoose.Schema(
 
     vehicleType: {
       type: String,
-      enum: ["bike", "auto", "car", "cab", "taxi"],
+      enum: ["bike", "auto", "minidoor"],
       required: true,
     },
 
     vehicleCapacity: {
       type: Number,
-      default: 1
+      default: 1,
     },
 
+    currentSeatLoad: {
+      type: Number,
+      default: 0,
+    },
 
     vehicleNumber: {
       type: String,
@@ -38,12 +42,12 @@ const driverSchema = new mongoose.Schema(
 
     tierLevel: {
       type: Number,
-      default: 1
+      default: 1,
     },
 
     tierName: {
       type: String,
-      default: "Bronze"
+      default: "Bronze",
     },
 
     totalTrips: {
@@ -82,8 +86,16 @@ const driverSchema = new mongoose.Schema(
         default: [0, 0],
       },
     },
+
+    lastHeartbeat: {
+      type: Date,
+      default: Date.now,
+    },
   },
-  { timestamps: true },
+  {
+    timestamps: true,
+    optimisticConcurrency: true
+  },
 );
 
 driverSchema.index({ currentLocation: "2dsphere" });

@@ -3,30 +3,30 @@ export const vehicleRules = {
   bike: {
     maxPassengers: 1,
     pricingMode: "perRide", // fixed
+    allowedShared: false
   },
 
   auto: {
     maxPassengers: 3,
     pricingMode: "perRide", // RTO fare regulated
+    allowedShared: false
   },
 
-  cab: {
-    maxPassengers: 4,
-    pricingMode: "perRide",
-  },
-
-  suv: {
-    maxPassengers: 6,
-    pricingMode: "perRide",
+  minidoor: {
+    maxPassengers: 9,
+    pricingMode: "perSeat",
+    allowedShared: true
   },
 
   shared_auto: {
     maxPassengers: 3,
     pricingMode: "perSeat",
+    allowedShared: true
   },
 
   shared_cab: {
     maxPassengers: 4,
     pricingMode: "perSeat",
+    allowedShared: true
   },
 };

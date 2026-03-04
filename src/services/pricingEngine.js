@@ -6,8 +6,15 @@ import { vehicleRules } from "../config/vehicleRules.js";
 const ROAD_MULTIPLIER = 1.3;
 
 // Surge guardrails
-const MAX_SURGE = 2.5;
+const MAX_SURGE = 2;
 const MIN_SURGE = 1;
+
+// 🔵 Unified Night Window (10 PM – 5 AM)
+function isNightTime(date) {
+  if (!date) return false;
+  const hour = date.getHours();
+  return hour >= 22 || hour < 5;
+}
 
 export function calculateFare({
   vehicleType,
@@ -19,6 +26,7 @@ export function calculateFare({
   demandMultiplier = 1,
   passengerCount = 1,
   rideType = "private",
+  rideStartTime,
 }) {
   //Validate vehicle rules
   const rule = vehicleRules[vehicleType];
@@ -46,18 +54,21 @@ export function calculateFare({
 
   const roadDistance = straightDistance * ROAD_MULTIPLIER;
 
-  const hour = requestTime.getHours();
-  const isNight = hour >= 0 && hour < 5;
+  const night = isNightTime(rideStartTime || requestTime);
 
   let baseFare;
 
   switch (vehicleType) {
     case "auto":
-      baseFare = autoFare(roadDistance, isNight);
+      baseFare = autoFare(roadDistance, night);
       break;
 
     case "bike":
       baseFare = bikeFare(roadDistance);
+      break;
+
+    case "minidoor":
+      baseFare = minidoorFare(roadDistance, night);
       break;
 
     case "cab":
@@ -68,7 +79,7 @@ export function calculateFare({
       break;
 
     case "shared_auto":
-      baseFare = autoFare(roadDistance, isNight);
+      baseFare = autoFare(roadDistance);
       break;
 
     case "shared_cab":
@@ -81,7 +92,7 @@ export function calculateFare({
 
   let passengerAdjustedFare = baseFare;
 
-  if (rideType === "shared") {
+  if (rule.pricingMode === "perSeat") {
     passengerAdjustedFare = baseFare * passengerCount;
   }
 
@@ -96,7 +107,7 @@ export function calculateFare({
   return {
     finalFare: Number(finalFare.toFixed(2)),
     distanceKm: Number(roadDistance.toFixed(2)),
-    isNight,
+    isNight: night,
     appliedSurge: safeMultiplier,
   };
 }
@@ -118,7 +129,7 @@ function autoFare(distanceKm, isNight) {
 
   if (isNight) fare *= 1.25;
 
-  return fare;
+  return Number(fare.toFixed(2));
 }
 
 function bikeFare(distanceKm) {
@@ -126,6 +137,30 @@ function bikeFare(distanceKm) {
   const PER_KM = 8;
 
   return BASE + distanceKm * PER_KM;
+}
+
+function minidoorFare({
+  distanceKm,
+  isNight, // must pass actual rideStartTime
+}) {
+  const MIN_DISTANCE = 2; // km
+  const MIN_FARE = 30; // per seat (first 2 km)
+  const PER_KM_RATE = 16; // per km beyond 2 km
+
+  let fare;
+
+  if (distanceKm <= MIN_DISTANCE) {
+    fare = MIN_FARE;
+  } else {
+    const extraDistance = distanceKm - MIN_DISTANCE;
+    fare = MIN_FARE + extraDistance * PER_KM_RATE;
+  }
+
+  if (isNight) {
+    fare *= 1.5; // 50% minidoor night
+  }
+
+  return Number(fare.toFixed(2));
 }
 
 function cabFare(distanceKm) {

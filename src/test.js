@@ -3,11 +3,17 @@ import { io } from "socket.io-client";
 
 const socket = io("http://localhost:5000");
 
-const DRIVER_ID = "69a6b5d89d7b4f98bfc785ad";
+const DRIVER_ID = "69a777a18d2865cc4eadf38c";
+
+const WAITING_TIME_BEFORE_START = 60000;
 
 socket.on("connect", () => {
   console.log("Connected:", socket.id);
   socket.emit("register-driver", DRIVER_ID);
+
+  setInterval(() => {
+    socket.emit("driver-heartbeat", DRIVER_ID);
+  }, 10000);
 });
 
 socket.on("new-ride", async (ride) => {
@@ -34,12 +40,16 @@ socket.on("ride-accepted-success", (ride) => {
 socket.on("ride-arrived", (ride) => {
   console.log("Arrived at pickup");
 
+  console.log(
+    `⏳ Simulating waiting time: ${WAITING_TIME_BEFORE_START / 60000} minutes`,
+  );
+
   setTimeout(() => {
     socket.emit("start-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
     });
-  }, 2000);
+  }, WAITING_TIME_BEFORE_START);
 });
 
 socket.on("ride-started", (ride) => {
@@ -51,6 +61,13 @@ socket.on("ride-started", (ride) => {
       driverId: DRIVER_ID,
     });
   }, 5000);
+});
+
+socket.on("ride-completed", (ride) => {
+  console.log("✅ Ride Completed");
+  console.log("Fare:", ride.fare);
+  console.log("Waiting Minutes:", ride.waitingMinutes);
+  console.log("Waiting Charge:", ride.waitingCharge);
 });
 
 socket.on("ride-error", (msg) => {

@@ -6,6 +6,7 @@ import Driver from "../models/Driver.js";
 import mongoose from "mongoose";
 import { driverTiers } from "../config/driverTier.js";
 import { calculateFare } from "../services/pricingEngine.js";
+import { withRetry } from "../utils/withRetry.js";
 
 export default function registerRideHandlers(socket) {
   socket.on("register-customer", (customerId) => {
@@ -15,61 +16,139 @@ export default function registerRideHandlers(socket) {
 
   socket.on("accept-ride", async ({ rideId, driverId }) => {
     try {
-      // 1️⃣ Check driver availability
-      const driver = await Driver.findOne({
-        _id: driverId,
-        isAvailable: true,
-        activeRide: null,
-      });
+      // 1️⃣ Fetch driver FIRST (outside transaction)
+      const driverCheck = await Driver.findById(driverId);
 
-      if (!driver) {
-        return socket.emit("ride-error", "Driver not available");
+      if (!driverCheck || !driverCheck.isAvailable) {
+        throw new Error("Driver not available");
       }
 
-      // 2️⃣ Atomic ride claim
-      const ride = await Ride.findOneAndUpdate(
-        { _id: rideId, status: "requested" },
-        {
-          $set: {
-            status: "accepted",
-            driver: driverId,
-          },
-        },
-        { returnDocument: "after" },
-      );
+      const HEARTBEAT_LIMIT = 30000;
 
-      if (!ride) {
-        return socket.emit("ride-error", "Ride already taken");
+      if (
+        !driverCheck.lastHeartbeat ||
+        Date.now() - new Date(driverCheck.lastHeartbeat).getTime() >
+          HEARTBEAT_LIMIT
+      ) {
+        throw new Error("Driver connection unstable");
       }
 
-      // 3️⃣ Mark driver unavailable
-      await Driver.findByIdAndUpdate(driverId, {
-        isAvailable: false,
-        activeRide: ride._id,
+      const ride = await withRetry(async () => {
+        const session = await mongoose.startSession();
+        session.startTransaction();
+
+        try {
+          console.log("🟡 SAFE ACCEPT RIDE:", rideId);
+
+          // 1️⃣ Atomically claim ride (prevents double driver accept)
+          const ride = await Ride.findOneAndUpdate(
+            { _id: rideId, status: "requested" },
+            {
+              $set: {
+                status: "accepted",
+                driver: driverId,
+              },
+            },
+            { returnDocument: "after", session },
+          );
+
+          if (!ride) {
+            throw new Error("Ride already accepted by another driver");
+          }
+
+          // 2️⃣ Fetch driver inside transaction
+          const driver = await Driver.findById(driverId).session(session);
+
+          if (!driver || !driver.isAvailable) {
+            throw new Error("Driver not available");
+          }
+
+          // const HEARTBEAT_LIMIT = 30000; // 30 seconds
+
+          // if (
+          //   !driver.lastHeartbeat ||
+          //   Date.now() - new Date(driver.lastHeartbeat).getTime() >
+          //     HEARTBEAT_LIMIT
+          // ) {
+          //   throw new Error("Driver connection unstable");
+          // }
+
+          // 3️⃣ Handle vehicle logic
+          if (driver.vehicleType === "minidoor") {
+            // Atomic seat allocation
+            const updatedDriver = await Driver.findOneAndUpdate(
+              {
+                _id: driverId,
+                currentSeatLoad: {
+                  $lte: driver.vehicleCapacity - ride.passengerCount,
+                },
+              },
+              {
+                $inc: { currentSeatLoad: ride.passengerCount },
+              },
+              { new: true, session },
+            );
+
+            if (!updatedDriver) {
+              throw new Error("Not enough seats available");
+            }
+
+            // If full after increment → mark unavailable
+            if (
+              updatedDriver.currentSeatLoad >= updatedDriver.vehicleCapacity
+            ) {
+              updatedDriver.isAvailable = false;
+            }
+
+            await updatedDriver.save({ session });
+
+            console.log(
+              "🪑 Seat Allocated | New Seat Load:",
+              updatedDriver.currentSeatLoad,
+            );
+          } else {
+            // Private vehicle protection
+            if (driver.activeRide) {
+              throw new Error("Driver already busy");
+            }
+
+            driver.isAvailable = false;
+            driver.activeRide = ride._id;
+
+            await driver.save({ session });
+          }
+
+          // 4️⃣ Commit transaction
+          await session.commitTransaction();
+          session.endSession();
+
+          console.log("✅ Ride safely accepted by:", driverId);
+
+          return ride;
+        } catch (error) {
+          await session.abortTransaction();
+          session.endSession();
+          throw error;
+        }
       });
+      // 5️⃣ Emit AFTER commit
+      socket.emit("ride-accepted-success", ride);
 
       const io = getIO();
-
-      // Notify customer
       const customerSocketId = onlineCustomers.get(ride.customer.toString());
 
       if (customerSocketId) {
         io.to(customerSocketId).emit("ride-accepted", ride);
       }
 
-      // Notify other drivers
+      // Notify other drivers ride taken
       for (const [id, sockId] of onlineDrivers.entries()) {
         if (id !== driverId) {
           io.to(sockId).emit("ride-taken", rideId);
         }
       }
-
-      // 6️⃣ Notify accepting driver success
-      socket.emit("ride-accepted-success", ride);
-
-      console.log("Ride accepted by:", driverId);
     } catch (error) {
-      socket.emit("ride-error", "Server error");
+      socket.emit("ride-error", error.message);
     }
   });
 
@@ -77,7 +156,7 @@ export default function registerRideHandlers(socket) {
     try {
       const ride = await Ride.findOneAndUpdate(
         { _id: rideId, driver: driverId, status: "accepted" },
-        { $set: { status: "arrived" } },
+        { $set: { status: "arrived", arrivalTime: new Date() } },
         { returnDocument: "after" },
       );
 
@@ -131,111 +210,179 @@ export default function registerRideHandlers(socket) {
   });
 
   socket.on("complete-ride", async ({ rideId, driverId }) => {
-    const session = await mongoose.startSession();
-    console.log("🟡 TX START | Ride:", rideId);
-
     try {
-      session.startTransaction();
-      const io = getIO();
+      const result = await withRetry(async () => {
+        const session = await mongoose.startSession();
+        console.log("🟡 TX START | Ride:", rideId);
+        session.startTransaction();
 
-      const ride = await Ride.findOneAndUpdate({
-        _id: rideId,
-        driver: driverId,
-        status: "ongoing",
-      }).session(session);
+        try {
+          const ride = await Ride.findOneAndUpdate(
+            {
+              _id: rideId,
+              driver: driverId,
+              status: "ongoing",
+            },
+            {},
+            { returnDocument: "after", session },
+          );
 
-      if (!ride) {
-        console.log("❌ Ride not found or invalid state");
-        throw new Error("Invalid ride state");
-      }
+          if (!ride) {
+            console.log("❌ Ride not found or invalid state");
+            throw new Error("Invalid ride state");
+          }
 
-      console.log("✅ Ride found");
+          console.log("✅ Ride found");
 
-      // Fetch driver
-      const driver = await Driver.findById(driverId).session(session);
-      if (!driver) {
-        console.log("❌ Driver not found");
-        throw new Error("Driver missing");
-      }
+          // Fetch driver
+          const driver = await Driver.findById(driverId).session(session);
+          if (!driver) {
+            console.log("❌ Driver not found");
+            throw new Error("Driver missing");
+          }
 
-      console.log("✅ Driver found");
+          console.log("✅ Driver found");
 
-      // 🔥 Calculate fare
-      const fareResult = calculateFare({
-        vehicleType: driver.vehicleType,
-        pickupLat: ride.pickupLocation.coordinates[1],
-        pickupLon: ride.pickupLocation.coordinates[0],
-        dropLat: ride.dropLocation.coordinates[1],
-        dropLon: ride.dropLocation.coordinates[0],
-        passengerCount: ride.passengerCount,
-        rideType: ride.rideType
+          // 🔥 Calculate fare
+          const fareResult = calculateFare({
+            vehicleType: driver.vehicleType,
+            pickupLat: ride.pickupLocation.coordinates[1],
+            pickupLon: ride.pickupLocation.coordinates[0],
+            dropLat: ride.dropLocation.coordinates[1],
+            dropLon: ride.dropLocation.coordinates[0],
+            passengerCount: ride.passengerCount,
+            rideType: ride.rideType,
+            rideStartTime: ride.rideStartTime,
+          });
+
+          let waitingMinutes = 0;
+          let waitingCharge = 0;
+
+          if (
+            driver.vehicleType === "auto" &&
+            ride.arrivalTime &&
+            ride.rideStartTime
+          ) {
+            const diffMs =
+              new Date(ride.rideStartTime).getTime() -
+              new Date(ride.arrivalTime).getTime();
+
+            waitingMinutes = Math.max(0, diffMs / (1000 * 60));
+            waitingMinutes = Math.ceil(waitingMinutes);
+
+            console.log("⏳ Raw Waiting Minutes:", waitingMinutes);
+
+            const FREE_MINUTES = 2;
+
+            if (waitingMinutes > FREE_MINUTES) {
+              const chargeableMinutes = waitingMinutes - FREE_MINUTES;
+
+              const PER_KM_RATE = 17.14;
+              const WAITING_RATE_PER_MIN = PER_KM_RATE * 0.1; // 10%
+
+              waitingCharge = chargeableMinutes * WAITING_RATE_PER_MIN;
+
+              ride.waitingMinutes = waitingMinutes;
+              ride.waitingCharge = Number(waitingCharge.toFixed(2));
+
+              console.log("⏳ Chargeable Minutes:", chargeableMinutes);
+              console.log("💰 Waiting Charge:", waitingCharge);
+            } else {
+              console.log("⏳ Within free waiting period");
+            }
+          }
+
+          console.log("💰 Fare calculated:", fareResult);
+
+          ride.status = "completed";
+          ride.rideEndTime = new Date();
+          ride.rideDistanceKm = fareResult.distanceKm;
+          ride.fare = Number((fareResult.finalFare + waitingCharge).toFixed(2));
+          const durationMinutes =
+            (Date.now() - new Date(ride.rideStartTime).getTime()) / (1000 * 60);
+
+          ride.rideDurationMinutes = Number(durationMinutes.toFixed(2));
+
+          // 🏆 Tier logic
+          const tier = driverTiers
+            .slice()
+            .reverse()
+            .find((t) => (driver.totalTrips || 0) >= t.minRides);
+
+          const commissionPercent = Math.max(tier.commission, 12);
+          const commission = (ride.fare * commissionPercent) / 100;
+          const driverEarning = ride.fare - commission;
+
+          ride.platformCommission = Number(commission.toFixed(2));
+          ride.driverEarning = Number(driverEarning.toFixed(2));
+
+          console.log("📊 Commission:", commissionPercent, "%");
+
+          await ride.save({ session });
+
+          console.log("✅ Ride saved inside TX");
+
+          // 5️⃣ Update driver stats inside transaction
+          driver.totalTrips += 1;
+          driver.totalEarnings += ride.driverEarning;
+          driver.totalDistanceKm += ride.rideDistanceKm;
+          driver.walletBalance += ride.driverEarning;
+
+          if (driver.vehicleType === "minidoor") {
+            console.log("🪑 Before Complete SeatLoad:", driver.currentSeatLoad);
+            driver.currentSeatLoad -= ride.passengerCount;
+            console.log("🪑 After Complete SeatLoad:", driver.currentSeatLoad);
+            if (driver.currentSeatLoad < 0) {
+              driver.currentSeatLoad = 0;
+            }
+
+            if (driver.currentSeatLoad < driver.vehicleCapacity) {
+              driver.isAvailable = true;
+            }
+
+            if (driver.currentSeatLoad === 0) {
+              driver.activeRide = null;
+            }
+          } else {
+            driver.isAvailable = true;
+            driver.activeRide = null;
+          }
+          // 🔼 Tier upgrade check
+          const newTier = driverTiers
+            .slice()
+            .reverse()
+            .find((t) => (driver.totalTrips || 0) >= t.minRides);
+
+          let tierUpgraded = false;
+
+          if (driver.tierLevel !== newTier.level) {
+            driver.tierLevel = newTier.level;
+            driver.tierName = newTier.name;
+            tierUpgraded = true;
+            console.log("🏆 Tier upgraded to:", newTier.name);
+          }
+
+          await driver.save({ session });
+
+          console.log("✅ Driver updated inside TX");
+
+          // 6️⃣ COMMIT (ALWAYS)
+          await session.commitTransaction();
+          session.endSession();
+
+          console.log("🟢 TX COMMITTED SUCCESSFULLY");
+          console.log(
+            `Ride ${ride._id} completed safely | Fare ₹${ride.fare} | Driver Rs. ${ride.driverEarning}`,
+          );
+          return { ride };
+        } catch (error) {
+          await session.abortTransaction();
+          session.endSession();
+          throw error;
+        }
       });
-
-      console.log("💰 Fare calculated:", fareResult);
-
-      ride.status = "completed";
-      ride.rideEndTime = new Date();
-      ride.rideDistanceKm = fareResult.distanceKm;
-      ride.fare = fareResult.finalFare;
-
-      const durationMinutes =
-        (Date.now() - new Date(ride.rideStartTime).getTime()) / (1000 * 60);
-
-      ride.rideDurationMinutes = Number(durationMinutes.toFixed(2));
-
-      // 🏆 Tier logic
-      const tier = driverTiers
-        .slice()
-        .reverse()
-        .find((t) => (driver.totalTrips || 0) >= t.minRides);
-
-      const commissionPercent = Math.max(tier.commission, 12);
-      const commission = (ride.fare * commissionPercent) / 100;
-      const driverEarning = ride.fare - commission;
-
-      ride.platformCommission = Number(commission.toFixed(2));
-      ride.driverEarning = Number(driverEarning.toFixed(2));
-
-      console.log("📊 Commission:", commissionPercent, "%");
-
-      await ride.save({ session });
-
-      console.log("✅ Ride saved inside TX");
-
-      // 5️⃣ Update driver stats inside transaction
-      driver.totalTrips += 1;
-      driver.totalEarnings += ride.driverEarning;
-      driver.totalDistanceKm += ride.rideDistanceKm;
-      driver.walletBalance += ride.driverEarning;
-      driver.isAvailable = true;
-      driver.activeRide = null;
-
-      // 🔼 Tier upgrade check
-      const newTier = driverTiers
-        .slice()
-        .reverse()
-        .find((t) => (driver.totalTrips || 0) >= t.minRides);
-
-      let tierUpgraded = false;
-
-      if (driver.tierLevel !== newTier.level) {
-        driver.tierLevel = newTier.level;
-        driver.tierName = newTier.name;
-        tierUpgraded = true;
-        console.log("🏆 Tier upgraded to:", newTier.name);
-      }
-
-      await driver.save({ session });
-
-      console.log("✅ Driver updated inside TX");
-
-      // 6️⃣ COMMIT (ALWAYS)
-      await session.commitTransaction();
-      session.endSession();
-
-      console.log("🟢 TX COMMITTED SUCCESSFULLY");
-
-      // 7️⃣ Emit AFTER commit
+      const { ride } = result;
+      const io = getIO();
       const customerSocketId = onlineCustomers.get(ride.customer.toString());
 
       if (customerSocketId) {
@@ -243,119 +390,132 @@ export default function registerRideHandlers(socket) {
       }
 
       socket.emit("ride-completed", ride);
-
-      if (tierUpgraded) {
-        const driverSocketId = onlineDrivers.get(driverId.toString());
-        if (driverSocketId) {
-          io.to(driverSocketId).emit("tier-upgraded", {
-            newTier: newTier.name,
-            commissionPercent,
-          });
-        }
-      }
-
-      console.log(`Ride ${ride._id} completed safely | Fare ₹${ride.fare} | Driver Rs. ${ride.driverEarning}`);
     } catch (error) {
-      await session.abortTransaction();
-      session.endSession();
-
-      console.error("Transaction Error:", error);
-      socket.emit("ride-error", "Completion failed");
+      socket.emit("ride-error", error.message);
     }
   });
+
   //CUSTOMER CANCELLATION
   socket.on("cancel-ride-by-customer", async ({ rideId, reason }) => {
     try {
-      const ride = await Ride.findById(rideId);
+      const ride = await withRetry(async () => {
+        const session = await mongoose.startSession();
 
-      if (!ride) {
-        return socket.emit("ride-error", "Ride not found");
-      }
+        try {
+          session.startTransaction();
 
-      // 🔐 Strict State Check
-      const allowedStates = ["requested", "accepted", "arrived"];
+          const ride = await Ride.findOne({
+            _id: rideId,
+            status: { $in: ["requested", "accepted", "arrived"] },
+          }).session(session);
 
-      if (!allowedStates.includes(ride.status)) {
-        return socket.emit("ride-error", "Cannot cancel at this stage");
-      }
+          if (!ride) {
+            throw new Error("Ride cannot be cancelled");
+          }
 
-      ride.status = "cancelled";
-      ride.cancelledBy = "customer";
-      ride.cancelReason = reason || "No reason provided";
+          ride.status = "cancelled";
+          ride.cancelledBy = "customer";
+          ride.cancelReason = reason || "No reason provided";
 
-      await ride.save();
+          await ride.save({ session });
 
-      // 🔓 Unlock driver if exists
-      if (ride.driver) {
-        await Driver.findByIdAndUpdate(ride.driver, {
-          isAvailable: true,
-          activeRide: null,
-        });
-      }
+          if (ride.driver) {
+            const driver = await Driver.findById(ride.driver).session(session);
 
-      const io = getIO();
+            if (!driver) throw new Error("Driver not found");
 
-      // Notify driver
-      if (ride.driver) {
-        const driverSocketId = onlineDrivers.get(ride.driver.toString());
+            if (driver.vehicleType === "minidoor") {
+              driver.currentSeatLoad -= ride.passengerCount;
+              if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;
 
-        if (driverSocketId) {
-          io.to(driverSocketId).emit("ride-cancelled", ride);
+              driver.isAvailable =
+                driver.currentSeatLoad < driver.vehicleCapacity;
+
+              if (driver.currentSeatLoad === 0) {
+                driver.activeRide = null;
+              }
+            } else {
+              driver.isAvailable = true;
+              driver.activeRide = null;
+            }
+
+            await driver.save({ session });
+          }
+
+          await session.commitTransaction();
+          session.endSession();
+
+          return ride;
+        } catch (error) {
+          await session.abortTransaction();
+          session.endSession();
+          throw error;
         }
-      }
+      });
 
       socket.emit("ride-cancelled-success", ride);
-
-      console.log("Ride cancelled by customer:", rideId);
     } catch (error) {
-      socket.emit("ride-error", "Cancellation failed");
+      socket.emit("ride-error", error.message);
     }
   });
 
   //DRIVER CANCELLATION
   socket.on("cancel-ride-by-driver", async ({ rideId, driverId, reason }) => {
     try {
-      const ride = await Ride.findOne({
-        _id: rideId,
-        driver: driverId,
+      const ride = await withRetry(async () => {
+        const session = await mongoose.startSession();
+        try {
+          session.startTransaction();
+
+          const ride = await Ride.findOne({
+            _id: rideId,
+            driver: driverId,
+            status: { $in: ["accepted", "arrived"] },
+          }).session(session);
+
+          if (!ride) throw new Error("Cannot cancel this ride");
+
+          ride.status = "cancelled";
+          ride.cancelledBy = "driver";
+          ride.cancelReason = reason || "Driver cancelled";
+
+          await ride.save({ session });
+
+          const driver = await Driver.findById(driverId).session(session);
+
+          if (!driver) throw new Error("Driver not found");
+
+          if (driver.vehicleType === "minidoor") {
+            driver.currentSeatLoad -= ride.passengerCount;
+            if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;
+
+            driver.isAvailable =
+              driver.currentSeatLoad < driver.vehicleCapacity;
+
+            if (driver.currentSeatLoad === 0) {
+              driver.activeRide = null;
+            }
+          } else {
+            driver.isAvailable = true;
+            driver.activeRide = null;
+          }
+
+          await driver.save({ session });
+
+          await session.commitTransaction();
+          session.endSession();
+
+          return ride;
+        } catch (error) {
+          await session.abortTransaction();
+          session.endSession();
+          throw error;
+        }
       });
-
-      if (!ride) {
-        return socket.emit("ride-error", "Ride not found");
-      }
-
-      const allowedStates = ["accepted", "arrived"];
-
-      if (!allowedStates.includes(ride.status)) {
-        return socket.emit("ride-error", "Driver cannot cancel at this stage");
-      }
-
-      ride.status = "cancelled";
-      ride.cancelledBy = "driver";
-      ride.cancelReason = reason || "Driver cancelled";
-
-      await ride.save();
-
-      // 🔓 Unlock driver
-      await Driver.findByIdAndUpdate(driverId, {
-        isAvailable: true,
-        activeRide: null,
-      });
-
-      const io = getIO();
-
-      // Notify customer
-      const customerSocketId = onlineCustomers.get(ride.customer.toString());
-
-      if (customerSocketId) {
-        io.to(customerSocketId).emit("ride-cancelled", ride);
-      }
 
       socket.emit("ride-cancelled-success", ride);
-
-      console.log("Ride cancelled by driver:", rideId);
     } catch (error) {
-      socket.emit("ride-error", "Cancellation failed");
+      socket.emit("ride-error", error.message);
     }
   });
 }

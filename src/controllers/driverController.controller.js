@@ -1,3 +1,4 @@
+import { vehicleRules } from "../config/vehicleRules.js";
 import Driver from "../models/Driver.js";
 import User from "../models/User.js";
 

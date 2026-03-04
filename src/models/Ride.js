@@ -70,10 +70,15 @@ const rideSchema = new mongoose.Schema(
     rideType: {
       type: String,
       enum: ["private", "shared"],
-      default: "private"
+      default: "private",
     },
 
     vehicleCapacity: { type: Number },
+
+    isShared: {
+      type: Boolean,
+      default: false,
+    },
 
     estimatedETA: { type: Number, default: 0 },
 
@@ -93,6 +98,20 @@ const rideSchema = new mongoose.Schema(
 
     rideStartTime: {
       type: Date,
+    },
+
+    arrivalTime: {
+      type: Date,
+    },
+
+    waitingMinutes: {
+      type: Number,
+      default: 0,
+    },
+
+    waitingCharge: {
+      type: Number,
+      default: 0,
     },
 
     rideDistanceKm: {
@@ -115,7 +134,7 @@ const rideSchema = new mongoose.Schema(
       default: 0,
     },
   },
-  { timestamps: true },
+  { timestamps: true, optimisticConcurrency: true },
 );
 
 rideSchema.index({ pickupLocation: "2dsphere" });

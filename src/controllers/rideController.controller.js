@@ -20,6 +20,11 @@ export const requestRide = async (req, res) => {
       rideType = "private",
     } = req.body;
 
+    console.log("🟡 REQUEST RIDE");
+    console.log("Vehicle:", vehicleType);
+    console.log("Passengers:", passengerCount);
+    console.log("RideType:", rideType);
+
     if (!vehicleType) {
       return res.status(400).json({
         message: "Vehicle type is required",
@@ -37,12 +42,6 @@ export const requestRide = async (req, res) => {
     if (passengerCount < 1 || passengerCount > rule.maxPassengers) {
       return res.status(400).json({
         message: `Maximum ${rule.maxPassengers} passengers allowed for ${vehicleType}`,
-      });
-    }
-
-    if (!["private", "shared"].includes(rideType)) {
-      return res.status(400).json({
-        message: "Invalid ride type",
       });
     }
 
@@ -76,38 +75,56 @@ export const requestRide = async (req, res) => {
       estimatedDistanceKm: fareResult.distanceKm,
       estimatedFare: fareResult.finalFare,
     });
+    console.log("✅ Ride Created:", ride._id);
     console.log("Passenger count:", passengerCount);
     console.log("Vehicle type:", vehicleType);
 
     // 🔎 Find nearest available driver within 5km
-    const nearestDriver = await Driver.find({
-      isAvailable: true,
-      activeRide: null,
-      vehicleCapacity: { $gte: passengerCount },
-      vehicleType,
-      currentLocation: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [pickupLongitude, pickupLatitude],
-          },
-          $maxDistance: 5000, // 5km
-        },
-      },
-    });
+    let nearestDriver;
 
-    if (nearestDriver.length === 0) {
+    if (vehicleType === "minidoor") {
+      nearestDriver = await Driver.find({
+        vehicleType: "minidoor",
+        isAvailable: true,
+
+        currentLocation: {
+          $near: {
+            $geometry: {
+              type: "Point",
+              coordinates: [pickupLongitude, pickupLatitude],
+            },
+            $maxDistance: 5000,
+          },
+        },
+      });
+    } else {
+      nearestDriver = await Driver.find({
+        isAvailable: true,
+        activeRide: null,
+        vehicleCapacity: { $gte: passengerCount },
+        vehicleType,
+        currentLocation: {
+          $near: {
+            $geometry: {
+              type: "Point",
+              coordinates: [pickupLongitude, pickupLatitude],
+            },
+            $maxDistance: 5000,
+          },
+        },
+      });
+    }
+    if (!nearestDriver.length) {
+      console.log("❌ No driver found");
       return res.status(404).json({ message: "No drivers available nearby" });
     }
-
+    const driver = nearestDriver[0];
+    console.log("🚗 Driver Found:", driver._id);
     const io = getIO();
 
-    for (let driver of nearestDriver) {
-      const socketId = onlineDrivers.get(driver._id.toString());
-
-      if (socketId) {
-        io.to(socketId).emit("new-ride", ride);
-      }
+    const socketId = onlineDrivers.get(driver._id.toString());
+    if (socketId) {
+      io.to(socketId).emit("new-ride", ride);
     }
 
     res.status(201).json({
@@ -116,6 +133,7 @@ export const requestRide = async (req, res) => {
       nearestDriver,
     });
   } catch (error) {
+    console.error("REQUEST RIDE ERROR:", error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -155,17 +173,32 @@ export const updateRideStatus = async (req, res) => {
 
     // 🔥 ALWAYS update driver availability if driver exists
     if (ride.driver) {
-      if (status === "accepted" || status === "ongoing") {
-        await Driver.findByIdAndUpdate(ride.driver, {
-          isAvailable: false,
-        });
-      }
+      const driver = await Driver.findById(ride.driver);
 
-      if (status === "completed" || status === "cancelled") {
-        await Driver.findByIdAndUpdate(ride.driver, {
-          isAvailable: true,
-          activeRide: null,
-        });
+      if (driver.vehicleType === "minidoor") {
+        if (status === "completed" || status === "cancelled") {
+          driver.currentSeatLoad -= ride.passengerCount;
+          if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;
+
+          driver.isAvailable = driver.currentSeatLoad < driver.vehicleCapacity;
+
+          if (driver.currentSeatLoad === 0) {
+            driver.activeRide = null;
+          }
+
+          await driver.save();
+        }
+      } else {
+        if (status === "accepted" || status === "ongoing") {
+          driver.isAvailable = false;
+        }
+
+        if (status === "completed" || status === "cancelled") {
+          driver.isAvailable = true;
+          driver.activeRide = null;
+        }
+
+        await driver.save();
       }
     }
 

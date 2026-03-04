@@ -133,6 +133,12 @@ const rideSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+
+    paymentMethod: {
+      type: String,
+      enum: ["cash", "online"],
+      default: "cash",
+    },
   },
   { timestamps: true, optimisticConcurrency: true },
 );

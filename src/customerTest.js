@@ -9,6 +9,10 @@ socket.on("connect", () => {
   socket.emit("register-customer", CUSTOMER_ID);
 });
 
+socket.on("driver-location", (data) => {
+  console.log("🚗 Driver moving:", data);
+});
+
 socket.emit("cancel-ride-by-customer", {
   rideId: "69a5fd109e072967453d8fed",
   reason: "Changed my mind",

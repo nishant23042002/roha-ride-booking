@@ -1,7 +1,10 @@
 // /src/socket/driver.socket.js
 
 import Driver from "../models/Driver.js";
-import { onlineDrivers } from "./index.js";
+import Ride from "../models/Ride.js";
+import { onlineDrivers, onlineCustomers, getIO } from "./index.js";
+import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
+const driverLastLocations = new Map();
 
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
@@ -16,5 +19,82 @@ export default function registerDriverHandlers(socket) {
     await Driver.findByIdAndUpdate(driverId, {
       lastHeartbeat: new Date(),
     });
+  });
+
+  socket.on("driver-location-update", async ({ driverId, lat, lng }) => {
+    try {
+      if (!driverId || lat === undefined || lng === undefined) return;
+
+      const last = driverLastLocations.get(driverId);
+
+      // 🚨 Prevent impossible jumps
+      if (last) {
+        const distance = haversineDistance(last.lat, last.lng, lat, lng);
+
+        const timeDiff = (Date.now() - last.timestamp) / 1000;
+
+        const speed = distance / (timeDiff / 3600); // km/h
+
+        if (speed > 150) {
+          console.log("🚨 Suspicious GPS jump ignored");
+          return;
+        }
+      }
+
+      // 🔵 Smooth GPS movement
+      const smoothed = smoothLocation(last, { lat, lng });
+
+      driverLastLocations.set(driverId, {
+        lat: smoothed.lat,
+        lng: smoothed.lng,
+        timestamp: Date.now(),
+      });
+
+      const driver = await Driver.findByIdAndUpdate(
+        driverId,
+        {
+          currentLocation: {
+            type: "Point",
+            coordinates: [smoothed.lng, smoothed.lat],
+          },
+          lastHeartbeat: new Date(),
+        },
+        { new: true },
+      );
+
+      if (!driver) return;
+
+      const io = getIO();
+ 
+      // 🚕 If driver has active ride → broadcast to passenger
+      if (driver.activeRide) {
+        const ride = await Ride.findById(driver.activeRide);
+
+        if (!ride) return;
+
+        const customerSocketId = onlineCustomers.get(ride.customer.toString());
+
+        if (customerSocketId) {
+          io.to(customerSocketId).emit("driver-location", {
+            driverId,
+            lat: smoothed.lat,
+            lng: smoothed.lng,
+            timestamp: Date.now(),
+          });
+        }
+      }
+    } catch (err) {
+      console.log("Location update error", err);
+    }
+  });
+
+  socket.on("disconnect", () => {
+    for (const [driverId, sockId] of onlineDrivers.entries()) {
+      if (sockId === socket.id) {
+        onlineDrivers.delete(driverId);
+        console.log("Driver disconnected:", driverId);
+        break;
+      }
+    }
   });
 }

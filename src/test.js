@@ -5,7 +5,50 @@ const socket = io("http://localhost:5000");
 
 const DRIVER_ID = "69a777a18d2865cc4eadf38c";
 
-const WAITING_TIME_BEFORE_START = 60000;
+const WAITING_TIME_BEFORE_START = 1000;
+
+const pickupRoute = [
+  { lat: 19.0752, lng: 72.8768 },
+  { lat: 19.0755, lng: 72.877 },
+  { lat: 19.0757, lng: 72.8773 },
+  { lat: 19.0759, lng: 72.8775 },
+  { lat: 19.076, lng: 72.8777 }, // pickup
+];
+const rideRoute = [
+  { lat: 19.076, lng: 72.8777 },
+  { lat: 19.0765, lng: 72.878 },
+  { lat: 19.077, lng: 72.8783 },
+  { lat: 19.0775, lng: 72.8787 },
+  { lat: 19.078, lng: 72.879 }, // drop
+];
+
+let step = 0;
+let gpsInterval = null;
+let currentRoute = pickupRoute;
+
+//simulate GPS movement
+function startGPS(route) {
+  currentRoute = route;
+  step = 0;
+
+  gpsInterval = setInterval(() => {
+    const point = currentRoute[step];
+
+    socket.emit("driver-location-update", {
+      driverId: DRIVER_ID,
+      lat: point.lat,
+      lng: point.lng,
+    });
+
+    console.log("📍 Driver moved to:", point);
+
+    step++;
+
+    if (step >= currentRoute.length) {
+      clearInterval(gpsInterval);
+    }
+  }, 3000);
+}
 
 socket.on("connect", () => {
   console.log("Connected:", socket.id);
@@ -29,17 +72,22 @@ socket.on("new-ride", async (ride) => {
 socket.on("ride-accepted-success", (ride) => {
   console.log("Ride accepted:", ride._id);
 
+  console.log("🚗 Driving to pickup");
+
+  startGPS(pickupRoute);
+
   setTimeout(() => {
     socket.emit("arrive-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
     });
-  }, 2000);
+  }, pickupRoute.length * 3000);
 });
 
 socket.on("ride-arrived", (ride) => {
-  console.log("Arrived at pickup");
+  console.log("📍 Driver arrived at pickup");
 
+  console.log("⏰ waiting for passenger");
   console.log(
     `⏳ Simulating waiting time: ${WAITING_TIME_BEFORE_START / 60000} minutes`,
   );
@@ -55,16 +103,22 @@ socket.on("ride-arrived", (ride) => {
 socket.on("ride-started", (ride) => {
   console.log("Ride started");
 
+  console.log("🚗 Driving to destination");
+
   setTimeout(() => {
     socket.emit("complete-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
     });
-  }, 5000);
+  }, rideRoute.length * 3000);
 });
 
 socket.on("ride-completed", (ride) => {
+  clearInterval(gpsInterval);
+
+  console.log("📍 GPS simulation stopped");
   console.log("✅ Ride Completed");
+
   console.log("Fare:", ride.fare);
   console.log("Waiting Minutes:", ride.waitingMinutes);
   console.log("Waiting Charge:", ride.waitingCharge);

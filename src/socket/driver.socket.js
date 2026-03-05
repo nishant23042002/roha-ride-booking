@@ -59,7 +59,7 @@ export default function registerDriverHandlers(socket) {
           },
           lastHeartbeat: new Date(),
         },
-        { new: true },
+        { returnDocument: "after" },
       );
 
       if (!driver) return;

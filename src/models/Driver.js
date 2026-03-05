@@ -33,11 +33,13 @@ const driverSchema = new mongoose.Schema(
     vehicleNumber: {
       type: String,
       required: true,
+      unique: true
     },
 
     licenseNumber: {
       type: String,
       required: true,
+      unique: true
     },
 
     tierLevel: {

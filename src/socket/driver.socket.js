@@ -9,10 +9,11 @@ const driverLastLocations = new Map();
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
     onlineDrivers.set(driverId, socket.id);
+
     await Driver.findByIdAndUpdate(driverId, {
       lastHeartbeat: new Date(),
     });
-    console.log("Driver registered:", driverId);
+    console.log(`[DRIVER ${driverId}] CONNECTED`);
   });
 
   socket.on("driver-heartbeat", async (driverId) => {
@@ -36,7 +37,7 @@ export default function registerDriverHandlers(socket) {
         const speed = distance / (timeDiff / 3600); // km/h
 
         if (speed > 150) {
-          console.log("🚨 Suspicious GPS jump ignored");
+          console.log(`[DRIVER ${driverId}] GPS_REJECTED unrealistic_speed`);
           return;
         }
       }
@@ -49,6 +50,10 @@ export default function registerDriverHandlers(socket) {
         lng: smoothed.lng,
         timestamp: Date.now(),
       });
+
+      console.log(
+        `[DRIVER ${driverId}] GPS_UPDATE lat=${smoothed.lat} lng=${smoothed.lng}`,
+      );
 
       const driver = await Driver.findByIdAndUpdate(
         driverId,
@@ -65,7 +70,7 @@ export default function registerDriverHandlers(socket) {
       if (!driver) return;
 
       const io = getIO();
- 
+
       // 🚕 If driver has active ride → broadcast to passenger
       if (driver.activeRide) {
         const ride = await Ride.findById(driver.activeRide);
@@ -92,7 +97,7 @@ export default function registerDriverHandlers(socket) {
     for (const [driverId, sockId] of onlineDrivers.entries()) {
       if (sockId === socket.id) {
         onlineDrivers.delete(driverId);
-        console.log("Driver disconnected:", driverId);
+        console.log(`[DRIVER ${driverId}] DISCONNECTED`);
         break;
       }
     }

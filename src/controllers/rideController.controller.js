@@ -4,6 +4,8 @@ import { getIO, onlineDrivers } from "../socket/index.js";
 import { calculateETA } from "../utils/eta.js";
 import { calculateFare } from "../services/pricingEngine.js";
 import { vehicleRules } from "../config/vehicleRules.js";
+import User from "../models/User.js";
+import mongoose from "mongoose";
 
 // 🔴 Create Ride Request
 export const requestRide = async (req, res) => {
@@ -20,10 +22,41 @@ export const requestRide = async (req, res) => {
       rideType = "private",
     } = req.body;
 
-    console.log("🟡 REQUEST RIDE");
-    console.log("Vehicle:", vehicleType);
-    console.log("Passengers:", passengerCount);
-    console.log("RideType:", rideType);
+    // 1️⃣ Validate required fields
+    if (
+      pickupLongitude === undefined ||
+      pickupLatitude === undefined ||
+      dropLongitude === undefined ||
+      dropLatitude === undefined ||
+      !vehicleType
+    ) {
+      return res.status(400).json({
+        message: "Missing required fields",
+      });
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(customerId)) {
+      return res.status(400).json({
+        message: "Invalid customer id",
+      });
+    }
+
+    console.log(`🟡REQUEST_RIDE_START`);
+    console.log(`[REQUEST] customer=${customerId}`);
+    console.log(
+      `[REQUEST] vehicle=${vehicleType} passengers=${passengerCount} type=${rideType}`,
+    );
+    console.log(
+      `[REQUEST] pickup=(${pickupLatitude},${pickupLongitude}) drop=(${dropLatitude},${dropLongitude})`,
+    );
+
+    // 2️⃣ Validate customer
+    const customer = await User.findById(customerId);
+    if (!customer) {
+      return res.status(404).json({
+        message: "Customer not found",
+      });
+    }
 
     if (!vehicleType) {
       return res.status(400).json({
@@ -75,62 +108,57 @@ export const requestRide = async (req, res) => {
       estimatedDistanceKm: fareResult.distanceKm,
       estimatedFare: fareResult.finalFare,
     });
-    console.log("✅ Ride Created:", ride._id);
-    console.log("Passenger count:", passengerCount);
-    console.log("Vehicle type:", vehicleType);
+    console.log(`[${ride._id}] RIDE_CREATED`);
+    console.log(`[${ride._id}] EST_DISTANCE=${fareResult.distanceKm}km`);
+    console.log(`[${ride._id}] EST_FARE=${fareResult.finalFare}`);
 
-    // 🔎 Find nearest available driver within 5km
-    let nearestDriver;
+    // 6️⃣ Find nearby drivers
+    const HEARTBEAT_LIMIT = 30000;
 
-    if (vehicleType === "minidoor") {
-      nearestDriver = await Driver.find({
-        vehicleType: "minidoor",
-        isAvailable: true,
+    const drivers = await Driver.find({
+      vehicleType,
+      isAvailable: true,
+      vehicleCapacity: { $gte: passengerCount },
 
-        currentLocation: {
-          $near: {
-            $geometry: {
-              type: "Point",
-              coordinates: [pickupLongitude, pickupLatitude],
-            },
-            $maxDistance: 5000,
+      lastHeartbeat: {
+        $gte: new Date(Date.now() - HEARTBEAT_LIMIT),
+      },
+
+      currentLocation: {
+        $near: {
+          $geometry: {
+            type: "Point",
+            coordinates: [pickupLongitude, pickupLatitude],
           },
+          $maxDistance: 5000,
         },
-      });
-    } else {
-      nearestDriver = await Driver.find({
-        isAvailable: true,
-        activeRide: null,
-        vehicleCapacity: { $gte: passengerCount },
-        vehicleType,
-        currentLocation: {
-          $near: {
-            $geometry: {
-              type: "Point",
-              coordinates: [pickupLongitude, pickupLatitude],
-            },
-            $maxDistance: 5000,
-          },
-        },
+      },
+    }).limit(5); // dispatch to top 5 drivers
+
+    if (!drivers.length) {
+      return res.status(404).json({
+        message: "No drivers available nearby",
       });
     }
-    if (!nearestDriver.length) {
-      console.log("❌ No driver found");
-      return res.status(404).json({ message: "No drivers available nearby" });
-    }
-    const driver = nearestDriver[0];
-    console.log("🚗 Driver Found:", driver._id);
+
     const io = getIO();
+    
+    console.log(`[${ride._id}] DISPATCH_START drivers=${drivers.length}`);
+    // 7️⃣ Dispatch ride to multiple drivers
+    for (const driver of drivers) {
+      console.log(`[${ride._id}] DISPATCH_DRIVER driver=${driver._id}`);
+      const socketId = onlineDrivers.get(driver._id.toString());
 
-    const socketId = onlineDrivers.get(driver._id.toString());
-    if (socketId) {
-      io.to(socketId).emit("new-ride", ride);
+      if (socketId) {
+        io.to(socketId).emit("new-ride", ride);
+      }
     }
+
 
     res.status(201).json({
       message: "Ride requested successfully",
       ride,
-      nearestDriver,
+      notifiedDrivers: drivers.length,
     });
   } catch (error) {
     console.error("REQUEST RIDE ERROR:", error);

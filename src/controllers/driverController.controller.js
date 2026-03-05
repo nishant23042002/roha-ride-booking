@@ -1,48 +1,144 @@
+// /src/controllers/driver.controller.js
+
+import mongoose from "mongoose";
 import { vehicleRules } from "../config/vehicleRules.js";
 import Driver from "../models/Driver.js";
+import DriverWallet from "../models/DriverWallet.js";
 import User from "../models/User.js";
 
-// Register as Driver
 export const registerDriver = async (req, res) => {
+  const session = await mongoose.startSession();
+
   try {
     const { userId, vehicleType, vehicleNumber, licenseNumber } = req.body;
 
-    const user = await User.findById(userId);
-
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
+    // -----------------------------
+    // 1️⃣ Basic validation
+    // -----------------------------
+    if (!userId || !vehicleType || !vehicleNumber || !licenseNumber) {
+      return res.status(400).json({
+        message: "Missing required fields",
+      });
     }
 
-    const existingDriver = await Driver.findOne({ user: userId });
+    const normalizedVehicleNumber = vehicleNumber.trim().toUpperCase();
+    const normalizedLicense = licenseNumber.trim().toUpperCase();
 
-    if (existingDriver) {
-      return res.status(400).json({ message: "Driver already registered" });
-    }
-
+    // -----------------------------
+    // 2️⃣ Validate vehicle type
+    // -----------------------------
     const rule = vehicleRules[vehicleType];
 
     if (!rule) {
-      return res.status(400).json({ message: "Invalid vehicle type" });
+      return res.status(400).json({
+        message: "Invalid vehicle type",
+      });
     }
 
-    const driver = await Driver.create({
-      user: userId,
-      vehicleType,
-      vehicleCapacity: rule.maxPassengers,
-      vehicleNumber,
-      licenseNumber,
-      isAvailable: false
+    // -----------------------------
+    // 3️⃣ Check user exists
+    // -----------------------------
+    const user = await User.findById(userId);
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    // -----------------------------
+    // 4️⃣ Prevent duplicate driver
+    // -----------------------------
+    const existingDriver = await Driver.findOne({ user: userId });
+
+    if (existingDriver) {
+      return res.status(400).json({
+        message: "User already registered as driver",
+      });
+    }
+
+    // -----------------------------
+    // 5️⃣ Prevent vehicle reuse
+    // -----------------------------
+    const vehicleExists = await Driver.findOne({
+      vehicleNumber: normalizedVehicleNumber,
     });
 
-    res.status(201).json({
+    if (vehicleExists) {
+      return res.status(400).json({
+        message: "Vehicle already registered",
+      });
+    }
+
+    // -----------------------------
+    // 6️⃣ Prevent license reuse
+    // -----------------------------
+    const licenseExists = await Driver.findOne({
+      licenseNumber: normalizedLicense,
+    });
+
+    if (licenseExists) {
+      return res.status(400).json({
+        message: "License already registered",
+      });
+    }
+
+    // -----------------------------
+    // 7️⃣ Start Transaction
+    // -----------------------------
+    session.startTransaction();
+
+    const driver = await Driver.create(
+      [
+        {
+          user: userId,
+          vehicleType,
+          vehicleCapacity: rule.maxPassengers,
+          vehicleNumber: normalizedVehicleNumber,
+          licenseNumber: normalizedLicense,
+          isAvailable: false,
+        },
+      ],
+      { session },
+    );
+
+    const wallet = await DriverWallet.create(
+      [
+        {
+          driver: driver[0]._id,
+          balance: 0,
+        },
+      ],
+      { session },
+    );
+
+    // -----------------------------
+    // 8️⃣ Commit Transaction
+    // -----------------------------
+    await session.commitTransaction();
+    session.endSession();
+
+    return res.status(201).json({
+      success: true,
       message: "Driver registered successfully",
-      driver,
+      data: {
+        driver: driver[0],
+        wallet: wallet[0],
+      },
     });
   } catch (error) {
-    res.status(500).json({ message: error.message });
+    await session.abortTransaction();
+    session.endSession();
+
+    console.error("Driver registration failed:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Driver registration failed",
+      error: error.message,
+    });
   }
 };
-
 // Toggle Availability
 export const toggleAvailability = async (req, res) => {
   try {

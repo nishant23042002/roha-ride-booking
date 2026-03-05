@@ -7,6 +7,7 @@ import mongoose from "mongoose";
 import { driverTiers } from "../config/driverTier.js";
 import { calculateFare } from "../services/pricingEngine.js";
 import { withRetry } from "../utils/withRetry.js";
+import { creditDriverWallet } from "../services/walletService.js";
 
 export default function registerRideHandlers(socket) {
   socket.on("register-customer", (customerId) => {
@@ -38,7 +39,7 @@ export default function registerRideHandlers(socket) {
         session.startTransaction();
 
         try {
-          console.log("🟡 SAFE ACCEPT RIDE:", rideId);
+          console.log(`[${rideId}] ACCEPT_ATTEMPT driver=${driverId}`);
 
           // 1️⃣ Atomically claim ride (prevents double driver accept)
           const ride = await Ride.findOneAndUpdate(
@@ -53,7 +54,8 @@ export default function registerRideHandlers(socket) {
           );
 
           if (!ride) {
-            throw new Error("Ride already accepted by another driver");
+            console.log(`[${rideId}] ACCEPT_REJECTED driver=${driverId}`);
+            throw new Error("Ride already accepted");
           }
 
           // 2️⃣ Fetch driver inside transaction
@@ -122,8 +124,7 @@ export default function registerRideHandlers(socket) {
           await session.commitTransaction();
           session.endSession();
 
-          console.log("✅ Ride safely accepted by:", driverId);
-
+          console.log(`[${rideId}] ACCEPT_SUCCESS driver=${driverId}`);
           return ride;
         } catch (error) {
           await session.abortTransaction();
@@ -172,7 +173,7 @@ export default function registerRideHandlers(socket) {
       // ALSO notify driver
       socket.emit("ride-arrived", ride);
 
-      console.log("Driver arrived at pickup:", rideId);
+      console.log(`[${rideId}] DRIVER_ARRIVED driver=${driverId}`);
     } catch (error) {
       socket.emit("ride-error", "Arrival failed");
     }
@@ -203,7 +204,7 @@ export default function registerRideHandlers(socket) {
       // notify driver
       socket.emit("ride-started", ride);
 
-      console.log("Ride started:", rideId);
+      console.log(`[${rideId}] RIDE_STARTED driver=${driverId}`);
     } catch (error) {
       socket.emit("ride-error", "Start failed");
     }
@@ -213,7 +214,7 @@ export default function registerRideHandlers(socket) {
     try {
       const result = await withRetry(async () => {
         const session = await mongoose.startSession();
-        console.log("🟡 TX START | Ride:", rideId);
+        console.log(`[${rideId}] TX_START`);
         session.startTransaction();
 
         try {
@@ -270,7 +271,7 @@ export default function registerRideHandlers(socket) {
             waitingMinutes = Math.max(0, diffMs / (1000 * 60));
             waitingMinutes = Math.ceil(waitingMinutes);
 
-            console.log("⏳ Raw Waiting Minutes:", waitingMinutes);
+            console.log(`[${rideId}] WAITING_MINUTES=${waitingMinutes}`);
 
             const FREE_MINUTES = 2;
 
@@ -285,14 +286,18 @@ export default function registerRideHandlers(socket) {
               ride.waitingMinutes = waitingMinutes;
               ride.waitingCharge = Number(waitingCharge.toFixed(2));
 
-              console.log("⏳ Chargeable Minutes:", chargeableMinutes);
-              console.log("💰 Waiting Charge:", waitingCharge);
+              console.log(
+                `[${rideId}] WAITING_CHARGEABLE_MINUTES=${chargeableMinutes}`,
+              );
+              console.log(`[${rideId}] WAITING_CHARGE=${waitingCharge}`);
             } else {
               console.log("⏳ Within free waiting period");
             }
           }
 
-          console.log("💰 Fare calculated:", fareResult);
+          console.log(
+            `[${rideId}] FARE_CALCULATED distance=${fareResult.distanceKm} base=${fareResult.finalFare}`,
+          );
 
           ride.status = "completed";
           ride.rideEndTime = new Date();
@@ -326,7 +331,17 @@ export default function registerRideHandlers(socket) {
           driver.totalTrips += 1;
           driver.totalEarnings += ride.driverEarning;
           driver.totalDistanceKm += ride.rideDistanceKm;
-          driver.walletBalance += ride.driverEarning;
+
+          console.log(
+            `[${rideId}] WALLET_CREDIT driver=${driverId} amount=${ride.driverEarning}`,
+          );
+          await creditDriverWallet({
+            driverId,
+            amount: ride.driverEarning,
+            reason: "ride_earning",
+            rideId: ride._id,
+            session,
+          });
 
           if (driver.vehicleType === "minidoor") {
             console.log("🪑 Before Complete SeatLoad:", driver.currentSeatLoad);
@@ -372,7 +387,7 @@ export default function registerRideHandlers(socket) {
 
           console.log("🟢 TX COMMITTED SUCCESSFULLY");
           console.log(
-            `Ride ${ride._id} completed safely | Fare ₹${ride.fare} | Driver Rs. ${ride.driverEarning}`,
+            `[${ride._id}] RIDE_COMPLETED fare=${ride.fare} driverEarning=${ride.driverEarning}`,
           );
           return { ride };
         } catch (error) {

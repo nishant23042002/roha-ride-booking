@@ -68,7 +68,10 @@ export function calculateFare({
       break;
 
     case "minidoor":
-      baseFare = minidoorFare(roadDistance, night);
+      baseFare = minidoorFare({
+        distanceKm: roadDistance,
+        isNight: night,
+      });
       break;
 
     case "cab":
@@ -103,6 +106,10 @@ export function calculateFare({
   );
 
   const finalFare = passengerAdjustedFare * safeMultiplier;
+
+  if (!Number.isFinite(finalFare)) {
+    throw new Error("Invalid fare calculation");
+  }
 
   return {
     finalFare: Number(finalFare.toFixed(2)),

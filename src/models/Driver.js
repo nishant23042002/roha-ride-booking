@@ -8,7 +8,21 @@ const driverSchema = new mongoose.Schema(
       required: true,
     },
 
-    activeRide: {
+    driverState: {
+      type: String,
+      enum: [
+        "offline",
+        "online",
+        "searching",
+        "requested",
+        "to_pickup",
+        "arrived",
+        "on_trip",
+      ],
+      default: "offline",
+    },
+
+    currentRide: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Ride",
       default: null,
@@ -33,13 +47,13 @@ const driverSchema = new mongoose.Schema(
     vehicleNumber: {
       type: String,
       required: true,
-      unique: true
+      unique: true,
     },
 
     licenseNumber: {
       type: String,
       required: true,
-      unique: true
+      unique: true,
     },
 
     tierLevel: {
@@ -72,11 +86,6 @@ const driverSchema = new mongoose.Schema(
       default: 0,
     },
 
-    isAvailable: {
-      type: Boolean,
-      default: false,
-    },
-
     currentLocation: {
       type: {
         type: String,
@@ -96,7 +105,7 @@ const driverSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
-    optimisticConcurrency: true
+    optimisticConcurrency: true,
   },
 );
 

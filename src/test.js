@@ -3,7 +3,7 @@ import { io } from "socket.io-client";
 
 const socket = io("http://localhost:5000");
 
-const DRIVER_ID = "69a777a18d2865cc4eadf38c";
+const DRIVER_ID = "69aa40d151fc30d47b82e4dc";
 
 const WAITING_TIME_BEFORE_START = 1000;
 
@@ -33,6 +33,11 @@ let step = 0;
 let gpsInterval = null;
 let state = "IDLE";
 
+function logState(newState) {
+  console.log(`\n🔄 STATE → ${newState}\n`);
+  state = newState;
+}
+
 //simulate GPS movement
 function startGPS(route) {
   if (gpsInterval) clearInterval(gpsInterval);
@@ -48,8 +53,9 @@ function startGPS(route) {
       lng: point.lng,
     });
 
-    console.log("📍 Driver moved to:", point, "| state: ", state);
-
+    console.log(
+      `📍 GPS_UPDATE → lat=${point.lat} lng=${point.lng} | state=${state}`,
+    );
     step++;
 
     if (step >= route.length) {
@@ -59,24 +65,36 @@ function startGPS(route) {
 }
 
 socket.on("connect", () => {
-  console.log("Driver Connected:", socket.id);
+  console.log("\n===============================");
+  console.log("🚗 DRIVER CONNECTED");
+  console.log("Socket:", socket.id);
+  console.log("===============================\n");
+
   socket.emit("register-driver", DRIVER_ID);
+
+  logState("ONLINE");
+
+  socket.emit("driver-go-online", DRIVER_ID);
+
+  logState("SEARCHING");
 
   setInterval(() => {
     socket.emit("driver-heartbeat", DRIVER_ID);
   }, 10000);
 
-  console.log("🚗 Driving roaming idel");
+  console.log("🚗 Driver roaming (idle mode)");
 
   startGPS(idleRoute);
 });
 
 socket.on("new-ride", async (ride) => {
-  console.log("🚕 New ride received:", ride._id);
+  console.log("\n===============================");
+  console.log("🚕 NEW RIDE REQUEST RECEIVED");
+  console.log("Ride ID:", ride._id);
+  console.log("===============================\n");
 
-  state = "TO_PICKUP";
+  logState("REQUESTED");
 
-  // simulate driver clicking accept
   socket.emit("accept-ride", {
     rideId: ride._id,
     driverId: DRIVER_ID,
@@ -84,31 +102,41 @@ socket.on("new-ride", async (ride) => {
 });
 
 socket.on("ride-accepted-success", (ride) => {
-  console.log("✅ Ride accepted:", ride._id);
+  console.log("\n===============================");
+  console.log("✅ RIDE ACCEPTED");
+  console.log("Ride:", ride._id);
+  console.log("===============================\n");
 
-  console.log("🚗 Driving to pickup");
+  logState("TO_PICKUP");
+
+  console.log("🚗 Navigating to pickup location");
 
   startGPS(pickupRoute);
 
-  const Arrival_TIME = (pickupRoute.length - 1) * 3000;
+  const arrivalTime = (pickupRoute.length - 1) * 3000;
+
   setTimeout(() => {
+    console.log("\n📍 ARRIVED AT PICKUP\n");
+
     socket.emit("arrive-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
     });
-  }, Arrival_TIME);
+  }, arrivalTime);
 });
 
 socket.on("ride-arrived", (ride) => {
-  console.log("📍 Driver arrived at pickup");
+  logState("ARRIVED");
 
-  state = "WAITING";
-  console.log("⏰ waiting for passenger");
+  console.log("⏰ Waiting for passenger");
+
   console.log(
-    `⏳ Simulating waiting time: ${WAITING_TIME_BEFORE_START / 60000} minutes`,
+    `⏳ Simulated waiting: ${WAITING_TIME_BEFORE_START / 60000} minutes`,
   );
 
   setTimeout(() => {
+    console.log("\n🚦 STARTING RIDE\n");
+
     socket.emit("start-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
@@ -117,15 +145,19 @@ socket.on("ride-arrived", (ride) => {
 });
 
 socket.on("ride-started", (ride) => {
-  console.log("Ride started");
+  console.log("\n===============================");
+  console.log("🚗 RIDE STARTED");
+  console.log("===============================\n");
 
-  state = "IN_RIDE";
-
-  startGPS(rideRoute);
+  logState("ON_TRIP");
 
   console.log("🚗 Driving to destination");
 
+  startGPS(rideRoute);
+
   setTimeout(() => {
+    console.log("\n🏁 REACHED DESTINATION\n");
+
     socket.emit("complete-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
@@ -134,27 +166,31 @@ socket.on("ride-started", (ride) => {
 });
 
 socket.on("ride-completed", (ride) => {
-  console.log("✅ Ride Completed");
+  console.log("\n===============================");
+  console.log("✅ RIDE COMPLETED");
+  console.log("===============================\n");
 
-  console.log("Fare:", ride.fare);
-  console.log("Waiting Minutes:", ride.waitingMinutes);
-  console.log("Waiting Charge:", ride.waitingCharge);
+  console.log("💰 Fare:", ride.fare);
+  console.log("🕒 Waiting Minutes:", ride.waitingMinutes);
+  console.log("💵 Waiting Charge:", ride.waitingCharge);
 
-  state = "IDLE";
+  logState("SEARCHING");
+
+  console.log("\n🚗 Driver returning to idle roaming\n");
 
   startGPS(idleRoute);
 });
 
 socket.on("ride-error", (msg) => {
-  console.log("Error:", msg);
+  console.log("\n❌ RIDE ERROR:", msg, "\n");
 });
 
 socket.on("ride-taken", (rideId) => {
-  console.log("Ride taken by someone else:", rideId);
+  console.log("\n⚠️ Ride already taken by another driver:", rideId, "\n");
 });
 
 socket.on("tier-upgraded", (data) => {
-  console.log("🔥 TIER UPGRADED!");
+  console.log("\n🔥 DRIVER TIER UPGRADED");
   console.log("New Tier:", data.newTier);
-  console.log("New Commission:", data.commissionPercent + "%");
+  console.log("Commission:", data.commissionPercent + "%\n");
 });

@@ -4,15 +4,23 @@ import Driver from "../models/Driver.js";
 import Ride from "../models/Ride.js";
 import { onlineDrivers, onlineCustomers, getIO } from "./index.js";
 import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
+import { changeDriverState } from "../services/driverState.service.js";
+
 const driverLastLocations = new Map();
 
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
     onlineDrivers.set(driverId, socket.id);
 
+    await changeDriverState({
+      driverId,
+      newState: "online",
+    });
+
     await Driver.findByIdAndUpdate(driverId, {
       lastHeartbeat: new Date(),
     });
+
     console.log(`[DRIVER ${driverId}] CONNECTED`);
   });
 
@@ -22,13 +30,22 @@ export default function registerDriverHandlers(socket) {
     });
   });
 
+  socket.on("driver-go-online", async (driverId) => {
+    await changeDriverState({
+      driverId,
+      newState: "searching",
+    });
+
+    console.log(`[DRIVER ${driverId}] READY_FOR_RIDES`);
+  });
+
   socket.on("driver-location-update", async ({ driverId, lat, lng }) => {
     try {
       if (!driverId || lat === undefined || lng === undefined) return;
 
       const last = driverLastLocations.get(driverId);
 
-      // 🚨 Prevent impossible jumps
+      // Prevent unrealistic GPS jumps
       if (last) {
         const distance = haversineDistance(last.lat, last.lng, lat, lng);
 
@@ -42,7 +59,6 @@ export default function registerDriverHandlers(socket) {
         }
       }
 
-      // 🔵 Smooth GPS movement
       const smoothed = smoothLocation(last, { lat, lng });
 
       driverLastLocations.set(driverId, {
@@ -71,9 +87,9 @@ export default function registerDriverHandlers(socket) {
 
       const io = getIO();
 
-      // 🚕 If driver has active ride → broadcast to passenger
-      if (driver.activeRide) {
-        const ride = await Ride.findById(driver.activeRide);
+      // If driver has ride → stream location to passenger
+      if (driver.currentRide) {
+        const ride = await Ride.findById(driver.currentRide);
 
         if (!ride) return;
 
@@ -93,11 +109,18 @@ export default function registerDriverHandlers(socket) {
     }
   });
 
-  socket.on("disconnect", () => {
+  socket.on("disconnect", async () => {
     for (const [driverId, sockId] of onlineDrivers.entries()) {
       if (sockId === socket.id) {
+        await changeDriverState({
+          driverId,
+          newState: "offline",
+        });
+
         onlineDrivers.delete(driverId);
+
         console.log(`[DRIVER ${driverId}] DISCONNECTED`);
+
         break;
       }
     }

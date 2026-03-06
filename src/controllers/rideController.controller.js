@@ -1,3 +1,5 @@
+// src/controller/rideController.controller.js
+
 import Ride from "../models/Ride.js";
 import Driver from "../models/Driver.js";
 import { getIO, onlineDrivers } from "../socket/index.js";
@@ -6,6 +8,7 @@ import { calculateFare } from "../services/pricingEngine.js";
 import { vehicleRules } from "../config/vehicleRules.js";
 import User from "../models/User.js";
 import mongoose from "mongoose";
+import { changeDriverState } from "../services/driverState.service.js";
 
 // 🔴 Create Ride Request
 export const requestRide = async (req, res) => {
@@ -117,7 +120,10 @@ export const requestRide = async (req, res) => {
 
     const drivers = await Driver.find({
       vehicleType,
-      isAvailable: true,
+
+      // ✅ new state machine condition
+      driverState: "searching",
+
       vehicleCapacity: { $gte: passengerCount },
 
       lastHeartbeat: {
@@ -133,7 +139,7 @@ export const requestRide = async (req, res) => {
           $maxDistance: 5000,
         },
       },
-    }).limit(5); // dispatch to top 5 drivers
+    }).limit(5);
 
     if (!drivers.length) {
       return res.status(404).json({
@@ -142,18 +148,23 @@ export const requestRide = async (req, res) => {
     }
 
     const io = getIO();
-    
+
     console.log(`[${ride._id}] DISPATCH_START drivers=${drivers.length}`);
     // 7️⃣ Dispatch ride to multiple drivers
     for (const driver of drivers) {
       console.log(`[${ride._id}] DISPATCH_DRIVER driver=${driver._id}`);
+
+      await changeDriverState({
+        driverId: driver._id,
+        newState: "requested",
+        rideId: ride._id,
+      });
       const socketId = onlineDrivers.get(driver._id.toString());
 
       if (socketId) {
         io.to(socketId).emit("new-ride", ride);
       }
     }
-
 
     res.status(201).json({
       message: "Ride requested successfully",
@@ -198,37 +209,6 @@ export const updateRideStatus = async (req, res) => {
 
     ride.status = status;
     await ride.save();
-
-    // 🔥 ALWAYS update driver availability if driver exists
-    if (ride.driver) {
-      const driver = await Driver.findById(ride.driver);
-
-      if (driver.vehicleType === "minidoor") {
-        if (status === "completed" || status === "cancelled") {
-          driver.currentSeatLoad -= ride.passengerCount;
-          if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;
-
-          driver.isAvailable = driver.currentSeatLoad < driver.vehicleCapacity;
-
-          if (driver.currentSeatLoad === 0) {
-            driver.activeRide = null;
-          }
-
-          await driver.save();
-        }
-      } else {
-        if (status === "accepted" || status === "ongoing") {
-          driver.isAvailable = false;
-        }
-
-        if (status === "completed" || status === "cancelled") {
-          driver.isAvailable = true;
-          driver.activeRide = null;
-        }
-
-        await driver.save();
-      }
-    }
 
     console.log("Ride driver:", ride.driver);
 

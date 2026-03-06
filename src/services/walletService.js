@@ -8,15 +8,17 @@ export async function creditDriverWallet({
   rideId,
   session,
 }) {
-  const wallet = await DriverWallet.findOne({ driver: driverId }).session(
-    session,
+  const wallet = await DriverWallet.findOneAndUpdate(
+    { driver: driverId },
+    {
+      $inc: { balance: amount },
+    },
+    {
+      returnDocument: "after",
+      session,
+    },
   );
-
   if (!wallet) throw new Error("Driver wallet missing");
-
-  wallet.balance = Number((wallet.balance + amount).toFixed(2));
-
-  await wallet.save({ session });
 
   await DriverWalletLedger.create(
     [

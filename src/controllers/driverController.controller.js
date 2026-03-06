@@ -96,7 +96,7 @@ export const registerDriver = async (req, res) => {
           vehicleCapacity: rule.maxPassengers,
           vehicleNumber: normalizedVehicleNumber,
           licenseNumber: normalizedLicense,
-          isAvailable: false,
+          driverState: "offline",
         },
       ],
       { session },

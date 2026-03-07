@@ -1,40 +1,45 @@
 // /src/test.js
 import { io } from "socket.io-client";
+import { calculateETA } from "./utils/eta.js";
+import { haversineDistance } from "./utils/gpsUtils.js";
+import { banner, logState } from "./utils/rideLogger.js";
 
 const socket = io("http://localhost:5000");
 
-const DRIVER_ID = "69aa40d151fc30d47b82e4dc";
+const DRIVER_ID = "69aa2faa533f56d3c03a51c5";
 
 const WAITING_TIME_BEFORE_START = 1000;
 
 const idleRoute = [
-  { lat: 19.0752, lng: 72.8768 },
-  { lat: 19.0754, lng: 72.8769 },
-  { lat: 19.0756, lng: 72.877 },
-  { lat: 19.0754, lng: 72.8769 },
+  { lat: 19.0635, lng: 72.867 },
+  { lat: 19.064, lng: 72.8675 },
+  { lat: 19.0638, lng: 72.8673 },
 ];
 
 const pickupRoute = [
-  { lat: 19.0752, lng: 72.8768 },
-  { lat: 19.0755, lng: 72.877 },
-  { lat: 19.0757, lng: 72.8773 },
-  { lat: 19.0759, lng: 72.8775 },
-  { lat: 19.076, lng: 72.8777 }, // pickup
+  { lat: 19.071, lng: 72.8726 },
+  { lat: 19.0725, lng: 72.874 },
+  { lat: 19.0738, lng: 72.8755 },
+  { lat: 19.0748, lng: 72.8765 },
+  { lat: 19.076, lng: 72.8774 }, // pickup
 ];
 const rideRoute = [
-  { lat: 19.076, lng: 72.8777 },
-  { lat: 19.0765, lng: 72.878 },
-  { lat: 19.077, lng: 72.8783 },
-  { lat: 19.0775, lng: 72.8787 },
-  { lat: 19.078, lng: 72.879 }, // drop
+  { lat: 19.076, lng: 72.8774 },
+  { lat: 19.0745, lng: 72.876 },
+  { lat: 19.073, lng: 72.8748 },
+  { lat: 19.0718, lng: 72.8736 },
+  { lat: 19.0707, lng: 72.8724 }, // drop
 ];
+
+
 
 let step = 0;
 let gpsInterval = null;
+
 let state = "IDLE";
 
-function logState(newState) {
-  console.log(`\n🔄 STATE → ${newState}\n`);
+function updateState(newState) {
+  logState(state, newState);
   state = newState;
 }
 
@@ -54,8 +59,9 @@ function startGPS(route) {
     });
 
     console.log(
-      `📍 GPS_UPDATE → lat=${point.lat} lng=${point.lng} | state=${state}`,
+      `📍 GPS → (${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}) | STATE: ${state}`,
     );
+
     step++;
 
     if (step >= route.length) {
@@ -66,34 +72,52 @@ function startGPS(route) {
 
 socket.on("connect", () => {
   console.log("\n===============================");
-  console.log("🚗 DRIVER CONNECTED");
+  banner("DRIVER SIMULATOR STARTED");
   console.log("Socket:", socket.id);
   console.log("===============================\n");
 
   socket.emit("register-driver", DRIVER_ID);
 
-  logState("ONLINE");
+  updateState("ONLINE");
 
   socket.emit("driver-go-online", DRIVER_ID);
 
-  logState("SEARCHING");
+  updateState("SEARCHING");
 
   setInterval(() => {
     socket.emit("driver-heartbeat", DRIVER_ID);
+    console.log("💓 Heartbeat sent");
   }, 10000);
 
-  console.log("🚗 Driver roaming (idle mode)");
+  console.log("\n🛰 Driver roaming in idle mode\n");
 
   startGPS(idleRoute);
 });
 
 socket.on("new-ride", async (ride) => {
-  console.log("\n===============================");
-  console.log("🚕 NEW RIDE REQUEST RECEIVED");
-  console.log("Ride ID:", ride._id);
-  console.log("===============================\n");
+  banner("NEW RIDE REQUEST RECEIVED");
 
-  logState("REQUESTED");
+  console.log("🆔 Ride ID:", ride._id);
+  console.log("👤 Customer:", ride.customer);
+  console.log("🚘 Vehicle:", ride.vehicleType);
+  console.log("👥 Passengers:", ride.passengerCount);
+  console.log("📦 Ride Type:", ride.rideType);
+
+  const pickup = ride.pickupLocation.coordinates;
+  const drop = ride.dropLocation.coordinates;
+
+  const distance = haversineDistance(pickup[1], pickup[0], drop[1], drop[0]);
+
+  console.log("📏 Estimated Distance:", distance.toFixed(2), "km");
+
+  const eta = calculateETA(distance);
+  console.log("⏳ Estimated Travel Time:", eta, "minutes");
+
+  console.log("💰 Estimated Fare:", ride.estimatedFare);
+
+  updateState("REQUESTED");
+
+  console.log("\n⚡ Accepting ride...\n");
 
   socket.emit("accept-ride", {
     rideId: ride._id,
@@ -102,21 +126,22 @@ socket.on("new-ride", async (ride) => {
 });
 
 socket.on("ride-accepted-success", (ride) => {
-  console.log("\n===============================");
-  console.log("✅ RIDE ACCEPTED");
-  console.log("Ride:", ride._id);
-  console.log("===============================\n");
+  banner("RIDE ACCEPTED");
 
-  logState("TO_PICKUP");
+  console.log("🆔 Ride:", ride._id);
 
-  console.log("🚗 Navigating to pickup location");
+  updateState("TO_PICKUP");
+
+  console.log("🧭 Navigating to pickup location");
 
   startGPS(pickupRoute);
 
   const arrivalTime = (pickupRoute.length - 1) * 3000;
 
+  console.log("⏳ Estimated arrival time:", arrivalTime / 1000, "seconds");
+
   setTimeout(() => {
-    console.log("\n📍 ARRIVED AT PICKUP\n");
+    console.log("\n📍 Driver reached pickup location\n");
 
     socket.emit("arrive-ride", {
       rideId: ride._id,
@@ -126,12 +151,16 @@ socket.on("ride-accepted-success", (ride) => {
 });
 
 socket.on("ride-arrived", (ride) => {
-  logState("ARRIVED");
+  banner("DRIVER ARRIVED");
+
+  updateState("ARRIVED");
 
   console.log("⏰ Waiting for passenger");
 
   console.log(
-    `⏳ Simulated waiting: ${WAITING_TIME_BEFORE_START / 60000} minutes`,
+    "🕒 Waiting time simulation:",
+    WAITING_TIME_BEFORE_START / 1000,
+    "seconds",
   );
 
   setTimeout(() => {
@@ -145,15 +174,17 @@ socket.on("ride-arrived", (ride) => {
 });
 
 socket.on("ride-started", (ride) => {
-  console.log("\n===============================");
-  console.log("🚗 RIDE STARTED");
-  console.log("===============================\n");
+  banner("RIDE STARTED");
 
-  logState("ON_TRIP");
+  updateState("ON_TRIP");
 
-  console.log("🚗 Driving to destination");
+  console.log("🗺 Driving towards destination");
 
   startGPS(rideRoute);
+
+  const travelTime = rideRoute.length * 3000;
+
+  console.log("⏳ Estimated trip duration:", travelTime / 1000, "seconds");
 
   setTimeout(() => {
     console.log("\n🏁 REACHED DESTINATION\n");
@@ -166,15 +197,23 @@ socket.on("ride-started", (ride) => {
 });
 
 socket.on("ride-completed", (ride) => {
-  console.log("\n===============================");
-  console.log("✅ RIDE COMPLETED");
-  console.log("===============================\n");
+  banner("RIDE COMPLETED");
 
-  console.log("💰 Fare:", ride.fare);
-  console.log("🕒 Waiting Minutes:", ride.waitingMinutes);
+  console.log("🆔 Ride:", ride._id);
+
+  console.log("📏 Distance Travelled:", ride.rideDistanceKm, "km");
+
+  console.log("💰 Total Fare:", ride.fare);
+
+  console.log("👨‍✈️ Driver Earnings:", ride.driverEarning);
+
+  console.log("🏢 Platform Commission:", ride.platformCommission);
+
+  console.log("⏱ Waiting Minutes:", ride.waitingMinutes);
+
   console.log("💵 Waiting Charge:", ride.waitingCharge);
 
-  logState("SEARCHING");
+  updateState("SEARCHING");
 
   console.log("\n🚗 Driver returning to idle roaming\n");
 

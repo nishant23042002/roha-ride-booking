@@ -5,6 +5,7 @@ import Ride from "../models/Ride.js";
 import { onlineDrivers, onlineCustomers, getIO } from "./index.js";
 import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
 import { changeDriverState } from "../services/driverState.service.js";
+import { banner, driverLog } from "../utils/rideLogger.js";
 
 const driverLastLocations = new Map();
 
@@ -14,29 +15,29 @@ export default function registerDriverHandlers(socket) {
 
     await changeDriverState({
       driverId,
-      newState: "online",
+      newState: "searching",
     });
 
     await Driver.findByIdAndUpdate(driverId, {
       lastHeartbeat: new Date(),
     });
 
-    console.log(`[DRIVER ${driverId}] CONNECTED`);
+    banner("DRIVER CONNECTED");
+
+    driverLog(
+      driverId,
+      "CONNECTED",
+      "Driver socket registered and marked online",
+      { socketId: socket.id },
+    );
   });
 
   socket.on("driver-heartbeat", async (driverId) => {
     await Driver.findByIdAndUpdate(driverId, {
       lastHeartbeat: new Date(),
     });
-  });
 
-  socket.on("driver-go-online", async (driverId) => {
-    await changeDriverState({
-      driverId,
-      newState: "searching",
-    });
-
-    console.log(`[DRIVER ${driverId}] READY_FOR_RIDES`);
+    driverLog(driverId, "HEARTBEAT", "Driver connection alive");
   });
 
   socket.on("driver-location-update", async ({ driverId, lat, lng }) => {
@@ -54,7 +55,12 @@ export default function registerDriverHandlers(socket) {
         const speed = distance / (timeDiff / 3600); // km/h
 
         if (speed > 150) {
-          console.log(`[DRIVER ${driverId}] GPS_REJECTED unrealistic_speed`);
+          driverLog(
+            driverId,
+            "GPS_REJECTED",
+            "Unrealistic GPS speed detected",
+            { speed: speed.toFixed(2) + "km/h" },
+          );
           return;
         }
       }
@@ -67,9 +73,10 @@ export default function registerDriverHandlers(socket) {
         timestamp: Date.now(),
       });
 
-      console.log(
-        `[DRIVER ${driverId}] GPS_UPDATE lat=${smoothed.lat} lng=${smoothed.lng}`,
-      );
+      driverLog(driverId, "GPS_UPDATE", "Driver location updated", {
+        lat: smoothed.lat.toFixed(6),
+        lng: smoothed.lng.toFixed(6),
+      });
 
       const driver = await Driver.findByIdAndUpdate(
         driverId,
@@ -96,6 +103,12 @@ export default function registerDriverHandlers(socket) {
         const customerSocketId = onlineCustomers.get(ride.customer.toString());
 
         if (customerSocketId) {
+          driverLog(
+            driverId,
+            "LOCATION_STREAM",
+            "Driver location streamed to passenger",
+            { rideId: ride._id },
+          );
           io.to(customerSocketId).emit("driver-location", {
             driverId,
             lat: smoothed.lat,
@@ -105,7 +118,8 @@ export default function registerDriverHandlers(socket) {
         }
       }
     } catch (err) {
-      console.log("Location update error", err);
+      console.log("\n❌ DRIVER LOCATION ERROR");
+      console.log(err);
     }
   });
 
@@ -119,7 +133,13 @@ export default function registerDriverHandlers(socket) {
 
         onlineDrivers.delete(driverId);
 
-        console.log(`[DRIVER ${driverId}] DISCONNECTED`);
+        banner("DRIVER DISCONNECTED");
+
+        driverLog(
+          driverId,
+          "DISCONNECTED",
+          "Driver socket disconnected and marked offline",
+        );
 
         break;
       }

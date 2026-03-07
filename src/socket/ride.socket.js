@@ -5,10 +5,12 @@ import { getIO, onlineDrivers, onlineCustomers } from "./index.js";
 import Driver from "../models/Driver.js";
 import mongoose from "mongoose";
 import { driverTiers } from "../config/driverTier.js";
-import { calculateFare } from "../services/pricingEngine.js";
+import { calculateFare } from "../services/pricing/priceEngine.js";
 import { withRetry } from "../utils/withRetry.js";
 import { creditDriverWallet } from "../services/walletService.js";
 import { changeDriverState } from "../services/driverState.service.js";
+import { banner } from "../utils/rideLogger.js";
+import { rideLog } from "../utils/rideLogger.js";
 
 export default function registerRideHandlers(socket) {
   socket.on("register-customer", (customerId) => {
@@ -23,8 +25,12 @@ export default function registerRideHandlers(socket) {
         session.startTransaction();
 
         try {
-          console.log(`[${rideId}] ACCEPT_ATTEMPT driver=${driverId}`);
-
+          rideLog(
+            rideId,
+            "DRIVER_ACCEPT_ATTEMPT",
+            "Driver attempting to claim ride",
+            { driverId },
+          );
           // -----------------------------
           // Fetch Driver
           // -----------------------------
@@ -76,7 +82,12 @@ export default function registerRideHandlers(socket) {
           );
 
           if (!ride) {
-            console.log(`[${rideId}] ACCEPT_REJECTED driver=${driverId}`);
+            rideLog(
+              rideId,
+              "ACCEPT_REJECTED",
+              "Ride already taken by another driver",
+              { driverId },
+            );
             throw new Error("Ride already accepted");
           }
 
@@ -102,8 +113,14 @@ export default function registerRideHandlers(socket) {
               throw new Error("Not enough seats available");
             }
 
-            console.log(
-              `🪑 Seat Allocated | New Seat Load: ${updatedDriver.currentSeatLoad}`,
+            rideLog(
+              rideId,
+              "SEAT_ALLOCATED",
+              "Seat allocated for shared vehicle",
+              {
+                passengerCount: ride.passengerCount,
+                newSeatLoad: updatedDriver.currentSeatLoad,
+              },
             );
           }
 
@@ -121,8 +138,14 @@ export default function registerRideHandlers(socket) {
           await session.commitTransaction();
           session.endSession();
 
-          console.log(`[${rideId}] ACCEPT_SUCCESS driver=${driverId}`);
+          banner("RIDE CLAIMED");
 
+          rideLog(
+            rideId,
+            "ACCEPT_SUCCESS",
+            "Driver successfully claimed ride",
+            { driverId },
+          );
           return { ride };
         } catch (error) {
           await session.abortTransaction();
@@ -160,7 +183,14 @@ export default function registerRideHandlers(socket) {
         session.startTransaction();
 
         try {
-          console.log(`[${rideId}] ARRIVAL_ATTEMPT driver=${driverId}`);
+          banner("DRIVER ARRIVING");
+
+          rideLog(
+            rideId,
+            "ARRIVAL_ATTEMPT",
+            "Driver reporting arrival at pickup",
+            { driverId },
+          );
 
           const ride = await Ride.findOne({
             _id: rideId,
@@ -204,7 +234,9 @@ export default function registerRideHandlers(socket) {
           await session.commitTransaction();
           session.endSession();
 
-          console.log(`[${rideId}] DRIVER_ARRIVED driver=${driverId}`);
+          rideLog(rideId, "DRIVER_ARRIVED", "Driver reached pickup location", {
+            driverId,
+          });
 
           return { ride };
         } catch (error) {
@@ -236,7 +268,14 @@ export default function registerRideHandlers(socket) {
         session.startTransaction();
 
         try {
-          console.log(`[${rideId}] START_RIDE_ATTEMPT driver=${driverId}`);
+          banner("RIDE STARTING");
+
+          rideLog(
+            rideId,
+            "START_RIDE_ATTEMPT",
+            "Driver attempting to start ride",
+            { driverId },
+          );
 
           const ride = await Ride.findOne({
             _id: rideId,
@@ -278,7 +317,9 @@ export default function registerRideHandlers(socket) {
           await session.commitTransaction();
           session.endSession();
 
-          console.log(`[${rideId}] RIDE_STARTED driver=${driverId}`);
+          rideLog(rideId, "RIDE_STARTED", "Ride has officially started", {
+            driverId,
+          });
 
           return { ride };
         } catch (error) {
@@ -367,8 +408,17 @@ export default function registerRideHandlers(socket) {
             }
           }
 
-          console.log(
-            `[${rideId}] FARE_CALCULATED distance=${fareResult.distanceKm} base=${fareResult.finalFare}`,
+          banner("FARE CALCULATION");
+
+          rideLog(
+            rideId,
+            "FARE_BREAKDOWN",
+            "Fare calculated after trip completion",
+            {
+              distanceKm: fareResult.distanceKm,
+              baseFare: fareResult.finalFare,
+              waitingCharge,
+            },
           );
 
           // -----------------------------
@@ -455,9 +505,15 @@ export default function registerRideHandlers(socket) {
           await session.commitTransaction();
           session.endSession();
 
-          console.log(
-            `[${ride._id}] RIDE_COMPLETED fare=${ride.fare} driverEarn=${ride.driverEarning}`,
-          );
+          banner("RIDE COMPLETED");
+
+          rideLog(ride._id, "TRIP_FINISHED", "Ride completed successfully", {
+            fare: ride.fare,
+            driverEarning: ride.driverEarning,
+            platformCommission: ride.platformCommission,
+            distanceKm: ride.rideDistanceKm,
+            durationMin: ride.rideDurationMinutes,
+          });
 
           return { ride };
         } catch (error) {
@@ -503,6 +559,17 @@ export default function registerRideHandlers(socket) {
           ride.status = "cancelled";
           ride.cancelledBy = "customer";
           ride.cancelReason = reason || "No reason provided";
+
+          banner("RIDE CANCELLED");
+
+          rideLog(
+            ride._id,
+            "CUSTOMER_CANCELLED",
+            "Ride cancelled by customer",
+            {
+              reason: ride.cancelReason,
+            },
+          );
 
           await ride.save({ session });
 
@@ -585,6 +652,13 @@ export default function registerRideHandlers(socket) {
           const driver = await Driver.findById(driverId).session(session);
 
           if (!driver) throw new Error("Driver not found");
+
+          banner("RIDE CANCELLED");
+
+          rideLog(ride._id, "DRIVER_CANCELLED", "Ride cancelled by driver", {
+            driverId,
+            reason: ride.cancelReason,
+          });
 
           if (driver.vehicleType === "minidoor") {
             driver.currentSeatLoad -= ride.passengerCount;

@@ -4,11 +4,14 @@ import Ride from "../models/Ride.js";
 import Driver from "../models/Driver.js";
 import { getIO, onlineDrivers } from "../socket/index.js";
 import { calculateETA } from "../utils/eta.js";
-import { calculateFare } from "../services/pricingEngine.js";
+import { calculateFare } from "../services/pricing/priceEngine.js";
 import { vehicleRules } from "../config/vehicleRules.js";
 import User from "../models/User.js";
 import mongoose from "mongoose";
 import { changeDriverState } from "../services/driverState.service.js";
+import { rideLog } from "../utils/rideLogger.js";
+import { banner } from "../utils/rideLogger.js";
+import { findBestDrivers } from "../services/dispatch/dispatchEngine.js";
 
 // 🔴 Create Ride Request
 export const requestRide = async (req, res) => {
@@ -44,13 +47,16 @@ export const requestRide = async (req, res) => {
       });
     }
 
-    console.log(`🟡REQUEST_RIDE_START`);
-    console.log(`[REQUEST] customer=${customerId}`);
+    banner("NEW RIDE REQUEST");
+
+    console.log("👤 CUSTOMER:", customerId);
+
     console.log(
-      `[REQUEST] vehicle=${vehicleType} passengers=${passengerCount} type=${rideType}`,
+      `🚘 VEHICLE=${vehicleType} | PASSENGERS=${passengerCount} | TYPE=${rideType}`,
     );
+
     console.log(
-      `[REQUEST] pickup=(${pickupLatitude},${pickupLongitude}) drop=(${dropLatitude},${dropLongitude})`,
+      `📍 PICKUP=(${pickupLatitude}, ${pickupLongitude}) → DROP=(${dropLatitude}, ${dropLongitude})`,
     );
 
     // 2️⃣ Validate customer
@@ -111,37 +117,75 @@ export const requestRide = async (req, res) => {
       estimatedDistanceKm: fareResult.distanceKm,
       estimatedFare: fareResult.finalFare,
     });
-    console.log(`[${ride._id}] RIDE_CREATED`);
-    console.log(`[${ride._id}] EST_DISTANCE=${fareResult.distanceKm}km`);
-    console.log(`[${ride._id}] EST_FARE=${fareResult.finalFare}`);
+    banner("RIDE CREATED");
+
+    rideLog(ride._id, "RIDE_CREATED", "Ride document created successfully", {
+      vehicleType,
+      passengerCount,
+      rideType,
+    });
+
+    rideLog(ride._id, "ESTIMATION", "Estimated trip details calculated", {
+      distanceKm: fareResult.distanceKm,
+      estimatedFare: fareResult.finalFare,
+      etaMinutes: estimatedETA,
+    });
 
     // 6️⃣ Find nearby drivers
     const HEARTBEAT_LIMIT = 30000;
+    banner("SEARCHING NEARBY DRIVERS");
 
-    const drivers = await Driver.find({
+    // const drivers = await Driver.find({
+    //   vehicleType,
+
+    //   // ✅ new state machine condition
+    //   driverState: "searching",
+
+    //   vehicleCapacity: { $gte: passengerCount },
+
+    //   lastHeartbeat: {
+    //     $gte: new Date(Date.now() - HEARTBEAT_LIMIT),
+    //   },
+
+    //   currentLocation: {
+    //     $near: {
+    //       $geometry: {
+    //         type: "Point",
+    //         coordinates: [pickupLongitude, pickupLatitude],
+    //       },
+    //       $maxDistance: 5000,
+    //     },
+    //   },
+    // }).limit(5);
+    const { drivers: rankedDrivers, radius } = await findBestDrivers({
+      pickupLat: pickupLatitude,
+      pickupLng: pickupLongitude,
       vehicleType,
+      passengerCount,
+      heartbeatLimit: HEARTBEAT_LIMIT,
+    });
 
-      // ✅ new state machine condition
-      driverState: "searching",
+    console.log(`DISPATCH SEARCH RADIUS: ${radius} meters`);
 
-      vehicleCapacity: { $gte: passengerCount },
+    rideLog(ride._id, "DRIVER_SEARCH_RESULT", "Nearby drivers found", {
+      driversFound: rankedDrivers.length,
+      searchRadius: `${radius}m `,
+    });
 
-      lastHeartbeat: {
-        $gte: new Date(Date.now() - HEARTBEAT_LIMIT),
-      },
+    if (!rankedDrivers.length) {
+      banner("NO DRIVERS AVAILABLE");
 
-      currentLocation: {
-        $near: {
-          $geometry: {
-            type: "Point",
-            coordinates: [pickupLongitude, pickupLatitude],
-          },
-          $maxDistance: 5000,
+      rideLog(
+        "N/A",
+        "DISPATCH_FAILED",
+        "No drivers found near pickup location",
+        {
+          vehicleType,
+          pickupLat: pickupLatitude,
+          pickupLng: pickupLongitude,
         },
-      },
-    }).limit(5);
+      );
 
-    if (!drivers.length) {
       return res.status(404).json({
         message: "No drivers available nearby",
       });
@@ -149,16 +193,41 @@ export const requestRide = async (req, res) => {
 
     const io = getIO();
 
-    console.log(`[${ride._id}] DISPATCH_START drivers=${drivers.length}`);
+    banner("DISPATCHING RIDE");
+
     // 7️⃣ Dispatch ride to multiple drivers
-    for (const driver of drivers) {
-      console.log(`[${ride._id}] DISPATCH_DRIVER driver=${driver._id}`);
+    // for (const driver of rankedDrivers) {
+    //   rideLog(ride._id, "DISPATCH_DRIVER", "Ride request sent to driver", {
+    //     driverId: driver._id,
+    //   });
+
+    //   await changeDriverState({
+    //     driverId: driver._id,
+    //     newState: "requested",
+    //     rideId: ride._id,
+    //   });
+    //   const socketId = onlineDrivers.get(driver._id.toString());
+
+    //   if (socketId) {
+    //     io.to(socketId).emit("new-ride", ride);
+    //   }
+    // }
+
+    const TOP_DRIVERS = 5;
+
+    const driversToDispatch = rankedDrivers.slice(0, TOP_DRIVERS);
+
+    for (const entry of driversToDispatch) {
+      const driver = entry.driver;
+
+      console.log(`Dispatching driver ${driver._id} ETA=${entry.etaMinutes}`);
 
       await changeDriverState({
         driverId: driver._id,
         newState: "requested",
         rideId: ride._id,
       });
+
       const socketId = onlineDrivers.get(driver._id.toString());
 
       if (socketId) {
@@ -169,10 +238,11 @@ export const requestRide = async (req, res) => {
     res.status(201).json({
       message: "Ride requested successfully",
       ride,
-      notifiedDrivers: drivers.length,
+      notifiedDrivers: rankedDrivers.length,
     });
   } catch (error) {
-    console.error("REQUEST RIDE ERROR:", error);
+    console.log("\n❌ RIDE REQUEST ERROR");
+    console.log(error);
     res.status(500).json({ message: error.message });
   }
 };
@@ -210,6 +280,10 @@ export const updateRideStatus = async (req, res) => {
     ride.status = status;
     await ride.save();
 
+    rideLog(rideId, "STATUS_UPDATE", "Ride status updated", {
+      newStatus: status,
+    });
+
     console.log("Ride driver:", ride.driver);
 
     res.status(200).json({
@@ -224,6 +298,7 @@ export const updateRideStatus = async (req, res) => {
 export const getAllRides = async (req, res) => {
   try {
     const rides = await Ride.find().populate("driver").populate("customer");
+    console.log(`📊 ADMIN FETCHED ALL RIDES | total=${rides.length}`);
 
     res.status(200).json({
       count: rides.length,

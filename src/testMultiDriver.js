@@ -1,31 +1,46 @@
 // /src/testMultiDriver.js
 
 import { io } from "socket.io-client";
+import { banner } from "./utils/rideLogger.js";
 
 const SERVER = "http://localhost:5000";
 
 const drivers = [
-  { id: "69aa2faa533f56d3c03a51c5", lat: 19.0754, lng: 72.8769 },
-  { id: "69aa3ea187d08041a30facbe", lat: 19.0752, lng: 72.8769 },
-  { id: "69aa3e5a62b90992de87d183", lat: 19.0756, lng: 72.877 },
-  { id: "69aa3e04646cdafc63e2a685", lat: 19.0758, lng: 72.8772 },
-  { id: "69aa3dc704e15420009c3f91", lat: 19.076, lng: 72.8774 },
+  { id: "69aa2faa533f56d3c03a51c5", lat: 19.0792, lng: 72.8772 }, //400m
+  { id: "69aa3ea187d08041a30facbe", lat: 19.089, lng: 72.879 }, //1.5km
+  { id: "69aa3e5a62b90992de87d183", lat: 19.0995, lng: 72.882 }, //2.7km
+  { id: "69aa3e04646cdafc63e2a685", lat: 19.116, lng: 72.8855 }, //4.5km
+  { id: "69aa3dc704e15420009c3f91", lat: 19.13, lng: 72.892 }, //6km
 ];
 
+banner("MULTI DRIVER SIMULATOR STARTED");
+
 drivers.forEach((driver) => {
+  let wonRide = false;
+
   const socket = io(SERVER);
 
   socket.on("connect", () => {
-    console.log(`🚗 DRIVER CONNECTED: ${driver.id}`);
+    console.log("----------------------------------------------------");
+    console.log(`🚗 DRIVER ONLINE`);
+    console.log(`Driver ID : ${driver.id}`);
+    console.log(`Socket ID : ${socket.id}`);
+    console.log("----------------------------------------------------\n");
 
     socket.emit("register-driver", driver.id);
+
+    console.log(`🟢 DRIVER ${driver.id} REGISTERED`);
 
     // move to searching state
     socket.emit("driver-go-online", driver.id);
 
+    console.log(`🔍 DRIVER ${driver.id} SEARCHING FOR RIDES\n`);
+
     // heartbeat
     setInterval(() => {
       socket.emit("driver-heartbeat", driver.id);
+
+      console.log(`💓 HEARTBEAT → ${driver.id}`);
     }, 10000);
 
     // GPS updates
@@ -39,13 +54,31 @@ drivers.forEach((driver) => {
         lat: driver.lat,
         lng: driver.lng,
       });
+
+      console.log(
+        `📍 GPS_UPDATE | DRIVER ${driver.id} | (${driver.lat.toFixed(5)}, ${driver.lng.toFixed(5)})`,
+      );
     }, 3000);
   });
 
   socket.on("new-ride", (ride) => {
-    console.log(`🚕 DRIVER ${driver.id} RECEIVED RIDE ${ride._id}`);
+    banner("NEW RIDE DISPATCHED");
+
+    console.log(
+      `📍 DRIVER LOCATION → (${driver.lat.toFixed(4)}, ${driver.lng.toFixed(4)})`,
+    );
+    console.log(`🚕 DRIVER ${driver.id} RECEIVED RIDE REQUEST`);
+    console.log(`Ride ID : ${ride._id}`);
+    console.log(`Vehicle : ${ride.vehicleType}`);
+    console.log(`Passengers : ${ride.passengerCount}`);
+    console.log(`Estimated Fare : ${ride.estimatedFare}`);
+    console.log("");
 
     const delay = Math.random() * 2000;
+
+    console.log(
+      `⏳ DRIVER ${driver.id} THINKING... (${delay.toFixed(0)}ms delay)`,
+    );
 
     setTimeout(() => {
       console.log(`⚡ DRIVER ${driver.id} TRY ACCEPT`);
@@ -58,14 +91,58 @@ drivers.forEach((driver) => {
   });
 
   socket.on("ride-accepted-success", (ride) => {
-    console.log(`✅ DRIVER ${driver.id} WON RIDE ${ride._id}`);
+    wonRide = true;
+    console.log(`🏆 DRIVER ${driver.id} WON RIDE ${ride._id}`);
+
+    // simulate reaching pickup
+    setTimeout(() => {
+      console.log(`📍 DRIVER ${driver.id} ARRIVED`);
+
+      socket.emit("arrive-ride", {
+        rideId: ride._id,
+        driverId: driver.id,
+      });
+    }, 5000);
   });
 
-  socket.on("ride-error", (msg) => {
-    console.log(`❌ DRIVER ${driver.id} ERROR: ${msg}`);
+  socket.on("ride-arrived", (ride) => {
+    if (!wonRide) return;
+    console.log(`🚦 DRIVER ${driver.id} STARTING RIDE`);
+
+    setTimeout(() => {
+      socket.emit("start-ride", {
+        rideId: ride._id,
+        driverId: driver.id,
+      });
+    }, 2000);
+  });
+
+  socket.on("ride-started", (ride) => {
+    if (!wonRide) return;
+    console.log(`🛣 DRIVER ${driver.id} ON TRIP`);
+
+    setTimeout(() => {
+      socket.emit("complete-ride", {
+        rideId: ride._id,
+        driverId: driver.id,
+      });
+    }, 10000);
+  });
+
+  socket.on("ride-completed", (ride) => {
+    console.log(`🏁 RIDE COMPLETED BY DRIVER ${driver.id}`);
+
+    console.log(`Fare: ${ride.fare}`);
+    console.log(`Driver Earning: ${ride.driverEarning}`);
   });
 
   socket.on("ride-taken", (rideId) => {
-    console.log(`⚠️ DRIVER ${driver.id} LOST RIDE ${rideId}`);
+    console.log(
+      `⚠️ DRIVER ${driver.id} LOST RIDE ${rideId} (another driver accepted first)`,
+    );
+  });
+
+  socket.on("ride-error", (msg) => {
+    console.log(`❌ DRIVER ${driver.id} ACCEPT FAILED → ${msg}`);
   });
 });

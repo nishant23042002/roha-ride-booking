@@ -5,13 +5,20 @@ import { vehicleRules } from "../config/vehicleRules.js";
 import Driver from "../models/Driver.js";
 import DriverWallet from "../models/DriverWallet.js";
 import User from "../models/User.js";
+import { banner, driverLog } from "../utils/rideLogger.js";
 
 export const registerDriver = async (req, res) => {
-  const session = await mongoose.startSession();
+  let session;
 
   try {
+    session = await mongoose.startSession();
     const { userId, vehicleType, vehicleNumber, licenseNumber } = req.body;
+    banner("DRIVER REGISTRATION REQUEST");
 
+    driverLog("REQUEST_RECEIVED", "New driver registration attempt", {
+      userId,
+      vehicleType,
+    });
     // -----------------------------
     // 1️⃣ Basic validation
     // -----------------------------
@@ -35,6 +42,11 @@ export const registerDriver = async (req, res) => {
       });
     }
 
+    driverLog("VEHICLE_VALIDATION", "Vehicle type validated", {
+      vehicleType,
+      maxPassengers: rule.maxPassengers,
+    });
+
     // -----------------------------
     // 3️⃣ Check user exists
     // -----------------------------
@@ -46,12 +58,19 @@ export const registerDriver = async (req, res) => {
       });
     }
 
+    driverLog("USER_VALIDATED", "User verified for driver registration", {
+      userId,
+    });
+
     // -----------------------------
     // 4️⃣ Prevent duplicate driver
     // -----------------------------
     const existingDriver = await Driver.findOne({ user: userId });
 
     if (existingDriver) {
+      driverLog("REGISTRATION_BLOCKED", "User already registered as driver", {
+        userId,
+      });
       return res.status(400).json({
         message: "User already registered as driver",
       });
@@ -65,6 +84,9 @@ export const registerDriver = async (req, res) => {
     });
 
     if (vehicleExists) {
+      driverLog("REGISTRATION_BLOCKED", "Vehicle already registered", {
+        vehicleNumber: normalizedVehicleNumber,
+      });
       return res.status(400).json({
         message: "Vehicle already registered",
       });
@@ -78,6 +100,10 @@ export const registerDriver = async (req, res) => {
     });
 
     if (licenseExists) {
+      driverLog("REGISTRATION_BLOCKED", "License already registered", {
+        licenseNumber: normalizedLicense,
+      });
+
       return res.status(400).json({
         message: "License already registered",
       });
@@ -86,6 +112,7 @@ export const registerDriver = async (req, res) => {
     // -----------------------------
     // 7️⃣ Start Transaction
     // -----------------------------
+    banner("DRIVER REGISTRATION TRANSACTION");
     session.startTransaction();
 
     const driver = await Driver.create(
@@ -102,6 +129,12 @@ export const registerDriver = async (req, res) => {
       { session },
     );
 
+    driverLog("DRIVER_CREATED", "Driver profile created", {
+      driverId: driver[0]._id,
+      vehicleType,
+      capacity: rule.maxPassengers,
+    });
+
     const wallet = await DriverWallet.create(
       [
         {
@@ -112,11 +145,21 @@ export const registerDriver = async (req, res) => {
       { session },
     );
 
+    driverLog("WALLET_CREATED", "Driver wallet initialized", {
+      walletId: wallet[0]._id,
+      balance: wallet[0].balance,
+    });
+
     // -----------------------------
     // 8️⃣ Commit Transaction
     // -----------------------------
     await session.commitTransaction();
     session.endSession();
+    banner("DRIVER REGISTRATION SUCCESS");
+
+    driverLog("REGISTRATION_COMPLETED", "Driver successfully onboarded", {
+      driverId: driver[0]._id,
+    });
 
     return res.status(201).json({
       success: true,
@@ -127,38 +170,19 @@ export const registerDriver = async (req, res) => {
       },
     });
   } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
+    if (session) {
+      await session.abortTransaction();
+      session.endSession();
+    }
 
-    console.error("Driver registration failed:", error);
+    console.log("\n❌ DRIVER REGISTRATION FAILED");
+    console.log(error);
 
     return res.status(500).json({
       success: false,
       message: "Driver registration failed",
       error: error.message,
     });
-  }
-};
-// Toggle Availability
-export const toggleAvailability = async (req, res) => {
-  try {
-    const { driverId } = req.body;
-
-    const driver = await Driver.findById(driverId);
-
-    if (!driver) {
-      return res.status(404).json({ message: "Driver not found" });
-    }
-
-    driver.isAvailable = !driver.isAvailable;
-    await driver.save();
-
-    res.status(200).json({
-      message: "Availability updated",
-      isAvailable: driver.isAvailable,
-    });
-  } catch (error) {
-    res.status(500).json({ message: error.message });
   }
 };
 
@@ -174,6 +198,11 @@ export const updateLocation = async (req, res) => {
     }
 
     driver.currentLocation.coordinates = [longitude, latitude];
+    driverLog("LOCATION_UPDATED", "Driver location updated manually", {
+      driverId,
+      latitude,
+      longitude,
+    });
     await driver.save();
 
     res.status(200).json({ message: "Location updated" });
@@ -185,7 +214,10 @@ export const updateLocation = async (req, res) => {
 export const getAllDrivers = async (req, res) => {
   try {
     const drivers = await Driver.find().populate();
-
+    driverLog("ADMIN_FETCH", "Admin fetched driver list", {
+      totalDrivers: drivers.length,
+    });
+    
     res.status(200).json({
       count: drivers.length,
       drivers,

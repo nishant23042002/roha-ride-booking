@@ -7,6 +7,7 @@ import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
 import { changeDriverState } from "../services/driverState.service.js";
 import { banner, driverLog } from "../utils/rideLogger.js";
 
+const activeDrivers = new Map();
 const driverLastLocations = new Map();
 
 export default function registerDriverHandlers(socket) {
@@ -43,7 +44,6 @@ export default function registerDriverHandlers(socket) {
   socket.on("driver-location-update", async ({ driverId, lat, lng }) => {
     try {
       if (!driverId || lat === undefined || lng === undefined) return;
-
       const last = driverLastLocations.get(driverId);
 
       // Prevent unrealistic GPS jumps
@@ -64,7 +64,7 @@ export default function registerDriverHandlers(socket) {
           return;
         }
       }
-
+      const io = getIO();
       const smoothed = smoothLocation(last, { lat, lng });
 
       driverLastLocations.set(driverId, {
@@ -73,9 +73,10 @@ export default function registerDriverHandlers(socket) {
         timestamp: Date.now(),
       });
 
-      driverLog(driverId, "GPS_UPDATE", "Driver location updated", {
-        lat: smoothed.lat.toFixed(6),
-        lng: smoothed.lng.toFixed(6),
+      activeDrivers.set(driverId, {
+        id: driverId,
+        latitude: smoothed.lat,
+        longitude: smoothed.lng,
       });
 
       const driver = await Driver.findByIdAndUpdate(
@@ -90,9 +91,19 @@ export default function registerDriverHandlers(socket) {
         { returnDocument: "after" },
       );
 
-      if (!driver) return;
+      // Broadcast driver location to all connected rider apps
+      io.emit("nearbyDrivers", Array.from(activeDrivers.values()));
 
-      const io = getIO();
+      driverLog(driverId, "GPS_UPDATE", "Driver location updated", {
+        lat: smoothed.lat.toFixed(6),
+        lng: smoothed.lng.toFixed(6),
+      });
+
+      console.log("Broadcasting drivers count: ", activeDrivers.size);
+
+      console.log("Broadcasting driver", driverId, smoothed);
+
+      if (!driver) return;
 
       // If driver has ride → stream location to passenger
       if (driver.currentRide) {
@@ -132,6 +143,8 @@ export default function registerDriverHandlers(socket) {
         });
 
         onlineDrivers.delete(driverId);
+        activeDrivers.delete(driverId);
+        driverLastLocations.delete(driverId);
 
         banner("DRIVER DISCONNECTED");
 

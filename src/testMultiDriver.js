@@ -6,11 +6,11 @@ import { banner } from "./utils/rideLogger.js";
 const SERVER = "http://localhost:5000";
 
 const drivers = [
-  { id: "69aa2faa533f56d3c03a51c5", lat: 19.0792, lng: 72.8772 }, //400m
-  { id: "69aa3ea187d08041a30facbe", lat: 19.089, lng: 72.879 }, //1.5km
-  { id: "69aa3e5a62b90992de87d183", lat: 19.0995, lng: 72.882 }, //2.7km
-  { id: "69aa3e04646cdafc63e2a685", lat: 19.116, lng: 72.8855 }, //4.5km
-  { id: "69aa3dc704e15420009c3f91", lat: 19.13, lng: 72.892 }, //6km
+  { id: "69aa2faa533f56d3c03a51c5", lat: 18.4343, lng: 73.1318 },
+  { id: "69aa3ea187d08041a30facbe", lat: 18.4347, lng: 73.1321 },
+  { id: "69aa3e5a62b90992de87d183", lat: 18.4341, lng: 73.1324 },
+  { id: "69aa3e04646cdafc63e2a685", lat: 18.435, lng: 73.1312 },
+  { id: "69aa3dc704e15420009c3f91", lat: 18.4353, lng: 73.1325 },
 ];
 
 banner("MULTI DRIVER SIMULATOR STARTED");

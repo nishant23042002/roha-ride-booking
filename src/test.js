@@ -11,27 +11,23 @@ const DRIVER_ID = "69aa2faa533f56d3c03a51c5";
 const WAITING_TIME_BEFORE_START = 1000;
 
 const idleRoute = [
-  { lat: 19.0635, lng: 72.867 },
-  { lat: 19.064, lng: 72.8675 },
-  { lat: 19.0638, lng: 72.8673 },
+  { lat: 18.4343, lng: 73.1318 },
+  { lat: 18.4347, lng: 73.1321 },
+  { lat: 18.4341, lng: 73.1324 },
 ];
 
 const pickupRoute = [
-  { lat: 19.071, lng: 72.8726 },
-  { lat: 19.0725, lng: 72.874 },
-  { lat: 19.0738, lng: 72.8755 },
-  { lat: 19.0748, lng: 72.8765 },
-  { lat: 19.076, lng: 72.8774 }, // pickup
+  { lat: 18.4352, lng: 73.1312 },
+  { lat: 18.4357, lng: 73.1316 },
+  { lat: 18.4361, lng: 73.1321 },
+  { lat: 18.4365, lng: 73.1326 },
 ];
 const rideRoute = [
-  { lat: 19.076, lng: 72.8774 },
-  { lat: 19.0745, lng: 72.876 },
-  { lat: 19.073, lng: 72.8748 },
-  { lat: 19.0718, lng: 72.8736 },
-  { lat: 19.0707, lng: 72.8724 }, // drop
+  { lat: 18.4365, lng: 73.1326 },
+  { lat: 18.4359, lng: 73.133 },
+  { lat: 18.4351, lng: 73.1334 },
+  { lat: 18.4344, lng: 73.1338 },
 ];
-
-
 
 let step = 0;
 let gpsInterval = null;
@@ -56,6 +52,7 @@ function startGPS(route) {
       driverId: DRIVER_ID,
       lat: point.lat,
       lng: point.lng,
+      vehicleType: "auto"
     });
 
     console.log(

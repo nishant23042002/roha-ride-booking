@@ -215,8 +215,11 @@ export const requestRide = async (req, res) => {
 
     const TOP_DRIVERS = 5;
 
-    const driversToDispatch = rankedDrivers.slice(0, TOP_DRIVERS);
+    const driversToDispatch = rankedDrivers
+      .filter((entry) => onlineDrivers.has(entry.driver._id.toString()))
+      .slice(0, TOP_DRIVERS);
 
+      
     for (const entry of driversToDispatch) {
       const driver = entry.driver;
 

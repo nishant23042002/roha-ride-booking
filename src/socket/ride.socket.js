@@ -156,13 +156,14 @@ export default function registerRideHandlers(socket) {
 
       const { ride } = result;
 
+      const io = getIO();
       socket.emit("ride-accepted-success", ride);
 
-      const io = getIO();
       const customerSocketId = onlineCustomers.get(ride.customer.toString());
 
       if (customerSocketId) {
         io.to(customerSocketId).emit("ride-accepted", ride);
+        console.log("📡 Sent ride-accepted to rider");
       }
 
       // notify other drivers ride taken

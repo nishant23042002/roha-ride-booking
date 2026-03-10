@@ -3,12 +3,12 @@ import { io } from "socket.io-client";
 import { calculateETA } from "./utils/eta.js";
 import { haversineDistance } from "./utils/gpsUtils.js";
 import { banner, logState } from "./utils/rideLogger.js";
+import axios from "axios";
+import polyline from "@mapbox/polyline";
 
 const socket = io("http://localhost:5000");
 
 const DRIVER_ID = "69aa2faa533f56d3c03a51c5";
-
-const WAITING_TIME_BEFORE_START = 1000;
 
 const idleRoute = [
   { lat: 18.4343, lng: 73.1318 },
@@ -16,22 +16,24 @@ const idleRoute = [
   { lat: 18.4341, lng: 73.1324 },
 ];
 
-const pickupRoute = [
-  { lat: 18.4352, lng: 73.1312 },
-  { lat: 18.4357, lng: 73.1316 },
-  { lat: 18.4361, lng: 73.1321 },
-  { lat: 18.4365, lng: 73.1326 },
-];
-const rideRoute = [
-  { lat: 18.4365, lng: 73.1326 },
-  { lat: 18.4359, lng: 73.133 },
-  { lat: 18.4351, lng: 73.1334 },
-  { lat: 18.4344, lng: 73.1338 },
-];
+async function getRoute(start, end) {
+  const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${start.lat},${start.lng}&destination=${end.lat},${end.lng}&key=AIzaSyD8F89IMJWc8Sn18ueBxUozeVqut2vG-pM`;
+
+  const res = await axios.get(url);
+
+  const points = res.data.routes[0].overview_polyline.points;
+
+  const decoded = polyline.decode(points);
+
+  return decoded.map((p) => ({
+    lat: p[0],
+    lng: p[1],
+  }));
+}
 
 let step = 0;
 let gpsInterval = null;
-
+let currentLocation = idleRoute[0];
 let state = "IDLE";
 
 function updateState(newState) {
@@ -40,32 +42,72 @@ function updateState(newState) {
 }
 
 //simulate GPS movement
-function startGPS(route) {
+function startGPS(route, target = null, onArrive = null) {
   if (gpsInterval) clearInterval(gpsInterval);
 
-  step = 0;
+  let segmentIndex = 0;
+  let progress = 0;
 
   gpsInterval = setInterval(() => {
-    const point = route[step];
+    if (segmentIndex >= route.length - 1) {
+      clearInterval(gpsInterval);
+      if (onArrive) onArrive();
+      return;
+    }
+
+    const start = route[segmentIndex];
+    const end = route[segmentIndex + 1];
+    const SPEED = 0.35
+    progress += SPEED // movement speed
+
+    const lat = start.lat + (end.lat - start.lat) * progress;
+    const lng = start.lng + (end.lng - start.lng) * progress;
+
+    currentLocation = { lat, lng };
 
     socket.emit("driver-location-update", {
       driverId: DRIVER_ID,
-      lat: point.lat,
-      lng: point.lng,
-      vehicleType: "auto"
+      lat,
+      lng,
+      vehicleType: "auto",
     });
 
-    console.log(
-      `📍 GPS → (${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}) | STATE: ${state}`,
-    );
+    if (target) {
+      const distance = haversineDistance(lat, lng, target.lat, target.lng);
 
-    step++;
+      if (distance < 0.02) {
+        // 20 meters
 
-    if (step >= route.length) {
-      step = 0;
+        clearInterval(gpsInterval);
+
+        if (onArrive) onArrive();
+
+        return;
+      }
     }
-  }, 3000);
+
+    if (progress >= 1) {
+      progress = 0;
+      segmentIndex++;
+    }
+  }, 1000);
 }
+
+async function startIdleRoaming() {
+  const roamPoint = {
+    lat: currentLocation.lat + (Math.random() - 0.5) * 0.002,
+    lng: currentLocation.lng + (Math.random() - 0.5) * 0.002,
+  };
+
+  const roamRoute = await getRoute(currentLocation, roamPoint);
+
+  startGPS(roamRoute, roamPoint, () => {
+    if (state === "SEARCHING") {
+      startIdleRoaming();
+    }
+  });
+}
+
 
 socket.on("connect", () => {
   console.log("\n===============================");
@@ -88,10 +130,11 @@ socket.on("connect", () => {
 
   console.log("\n🛰 Driver roaming in idle mode\n");
 
-  startGPS(idleRoute);
+  startIdleRoaming();
 });
 
 socket.on("new-ride", async (ride) => {
+  if (gpsInterval) clearInterval(gpsInterval);
   banner("NEW RIDE REQUEST RECEIVED");
 
   console.log("🆔 Ride ID:", ride._id);
@@ -116,49 +159,46 @@ socket.on("new-ride", async (ride) => {
 
   console.log("\n⚡ Accepting ride...\n");
 
-  socket.emit("accept-ride", {
-    rideId: ride._id,
-    driverId: DRIVER_ID,
-  });
+  setTimeout(() => {
+    socket.emit("accept-ride", {
+      rideId: ride._id,
+      driverId: DRIVER_ID,
+    });
+  }, 4000);
 });
 
-socket.on("ride-accepted-success", (ride) => {
+socket.on("ride-accepted-success", async (ride) => {
   banner("RIDE ACCEPTED");
-
-  console.log("🆔 Ride:", ride._id);
 
   updateState("TO_PICKUP");
 
   console.log("🧭 Navigating to pickup location");
 
-  startGPS(pickupRoute);
+  const pickup = {
+    lat: ride.pickupLocation.coordinates[1],
+    lng: ride.pickupLocation.coordinates[0],
+  };
 
-  const arrivalTime = (pickupRoute.length - 1) * 3000;
+  const dynamicRoute = await getRoute(currentLocation, pickup);
 
-  console.log("⏳ Estimated arrival time:", arrivalTime / 1000, "seconds");
-
-  setTimeout(() => {
+  startGPS(dynamicRoute, pickup, () => {
     console.log("\n📍 Driver reached pickup location\n");
 
     socket.emit("arrive-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
     });
-  }, arrivalTime);
+  });
 });
 
 socket.on("ride-arrived", (ride) => {
+  if (gpsInterval) clearInterval(gpsInterval);
+
   banner("DRIVER ARRIVED");
 
   updateState("ARRIVED");
 
   console.log("⏰ Waiting for passenger");
-
-  console.log(
-    "🕒 Waiting time simulation:",
-    WAITING_TIME_BEFORE_START / 1000,
-    "seconds",
-  );
 
   setTimeout(() => {
     console.log("\n🚦 STARTING RIDE\n");
@@ -167,30 +207,36 @@ socket.on("ride-arrived", (ride) => {
       rideId: ride._id,
       driverId: DRIVER_ID,
     });
-  }, WAITING_TIME_BEFORE_START);
+  }, 6000);
 });
 
-socket.on("ride-started", (ride) => {
+socket.on("ride-started", async (ride) => {
+  if (gpsInterval) clearInterval(gpsInterval);
   banner("RIDE STARTED");
 
   updateState("ON_TRIP");
 
   console.log("🗺 Driving towards destination");
 
-  startGPS(rideRoute);
+  const pickup = {
+    lat: ride.pickupLocation.coordinates[1],
+    lng: ride.pickupLocation.coordinates[0],
+  };
 
-  const travelTime = rideRoute.length * 3000;
+  const drop = {
+    lat: ride.dropLocation.coordinates[1],
+    lng: ride.dropLocation.coordinates[0],
+  };
 
-  console.log("⏳ Estimated trip duration:", travelTime / 1000, "seconds");
-
-  setTimeout(() => {
+  const tripRoute = await getRoute(pickup, drop);
+  startGPS(tripRoute, drop, () => {
     console.log("\n🏁 REACHED DESTINATION\n");
 
     socket.emit("complete-ride", {
       rideId: ride._id,
       driverId: DRIVER_ID,
     });
-  }, rideRoute.length * 3000);
+  });
 });
 
 socket.on("ride-completed", (ride) => {
@@ -214,7 +260,7 @@ socket.on("ride-completed", (ride) => {
 
   console.log("\n🚗 Driver returning to idle roaming\n");
 
-  startGPS(idleRoute);
+  startIdleRoaming();
 });
 
 socket.on("ride-error", (msg) => {

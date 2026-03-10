@@ -10,6 +10,18 @@ import { banner, driverLog } from "../utils/rideLogger.js";
 const activeDrivers = new Map();
 const driverLastLocations = new Map();
 
+setInterval(() => {
+  const io = getIO();
+
+  const drivers = Array.from(activeDrivers.values());
+
+  if (drivers.length === 0) return;
+
+  io.to("rider-map-room").emit("nearbyDrivers", drivers);
+
+  console.log("📡 DRIVER BATCH BROADCAST:", drivers.length);
+}, 1000);
+
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
     onlineDrivers.set(driverId, socket.id);
@@ -64,7 +76,7 @@ export default function registerDriverHandlers(socket) {
           return;
         }
       }
-      const io = getIO();
+
       const smoothed = smoothLocation(last, { lat, lng });
 
       driverLastLocations.set(driverId, {
@@ -92,7 +104,6 @@ export default function registerDriverHandlers(socket) {
       );
 
       // Broadcast driver location to all connected rider apps
-      io.emit("nearbyDrivers", Array.from(activeDrivers.values()));
 
       driverLog(driverId, "GPS_UPDATE", "Driver location updated", {
         lat: smoothed.lat.toFixed(6),
@@ -107,6 +118,7 @@ export default function registerDriverHandlers(socket) {
 
       // If driver has ride → stream location to passenger
       if (driver.currentRide) {
+        const io = getIO();
         const ride = await Ride.findById(driver.currentRide);
 
         if (!ride) return;
@@ -132,6 +144,10 @@ export default function registerDriverHandlers(socket) {
       console.log("\n❌ DRIVER LOCATION ERROR");
       console.log(err);
     }
+  });
+
+  socket.on("join-map-room", () => {
+    socket.join("rider-map-room");
   });
 
   socket.on("disconnect", async () => {

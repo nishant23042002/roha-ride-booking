@@ -5,8 +5,8 @@ import Driver from "../../models/Driver.js";
 const SEARCH_RADII = [1000, 2000, 3000, 5000]; // meters
 
 export async function radiusDriverSearch({
-  pickupLng,
   pickupLat,
+  pickupLng,
   vehicleType,
   passengerCount,
   heartbeatLimit,

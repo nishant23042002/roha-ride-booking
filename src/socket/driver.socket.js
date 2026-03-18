@@ -16,11 +16,12 @@ setInterval(() => {
   const drivers = Array.from(activeDrivers.values());
 
   if (drivers.length === 0) return;
+  if (process.env.NODE_ENV === "development") {
+    console.log("📡 Drivers:", drivers.length);
+  }
 
   io.to("rider-map-room").emit("nearbyDrivers", drivers);
-
-  console.log("📡 DRIVER BATCH BROADCAST:", drivers.length);
-}, 1000);
+}, 1200);
 
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
@@ -91,17 +92,24 @@ export default function registerDriverHandlers(socket) {
         longitude: smoothed.lng,
       });
 
-      const driver = await Driver.findByIdAndUpdate(
-        driverId,
-        {
-          currentLocation: {
-            type: "Point",
-            coordinates: [smoothed.lng, smoothed.lat],
+      let driver = null;
+
+      try {
+        driver = await Driver.findByIdAndUpdate(
+          driverId,
+          {
+            currentLocation: {
+              type: "Point",
+              coordinates: [smoothed.lng, smoothed.lat],
+            },
+            lastHeartbeat: new Date(),
           },
-          lastHeartbeat: new Date(),
-        },
-        { returnDocument: "after" },
-      );
+          { returnDocument: "after" },
+        );
+      } catch (err) {
+        console.log("❌ DB UPDATE FAILED:", err.message);
+        return; // 🚨 STOP further execution
+      }
 
       // Broadcast driver location to all connected rider apps
 
@@ -109,10 +117,6 @@ export default function registerDriverHandlers(socket) {
         lat: smoothed.lat.toFixed(6),
         lng: smoothed.lng.toFixed(6),
       });
-
-      console.log("Broadcasting drivers count: ", activeDrivers.size);
-
-      console.log("Broadcasting driver", driverId, smoothed);
 
       if (!driver) return;
 
@@ -146,7 +150,8 @@ export default function registerDriverHandlers(socket) {
     }
   });
 
-  socket.on("join-map-room", () => {
+  socket.on("join-map-room", (data) => {
+    console.log("🗺️ USER JOINED MAP ROOM:", socket.id, data);
     socket.join("rider-map-room");
   });
 

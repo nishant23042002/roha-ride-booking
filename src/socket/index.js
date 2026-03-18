@@ -17,13 +17,14 @@ export const initSocket = (server) => {
   });
 
   io.on("connection", (socket) => {
-    console.log("Socket connected:", socket.id);
+    console.log("\n🟢 SOCKET CONNECTED:", socket.id);
 
     registerDriverHandlers(socket);
     registerRideHandlers(socket);
 
     socket.on("disconnect", () => {
       handleDisconnect(socket);
+      console.log("🔴 SOCKET DISCONNECTED:", socket.id);
     });
   });
 };

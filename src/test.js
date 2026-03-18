@@ -5,8 +5,23 @@ import { haversineDistance } from "./utils/gpsUtils.js";
 import { banner, logState } from "./utils/rideLogger.js";
 import axios from "axios";
 import polyline from "@mapbox/polyline";
+console.log("🚀 TEST SCRIPT STARTED");
 
-const socket = io("http://localhost:5000");
+const socket = io("http://127.0.0.1:5000", {
+  transports: ["websocket"],
+});
+
+socket.on("connect", () => {
+  console.log("🟢 DRIVER SOCKET CONNECTED:", socket.id);
+});
+
+socket.on("connect_error", (err) => {
+  console.log("❌ SOCKET CONNECTION ERROR:", err.message);
+});
+
+socket.on("disconnect", () => {
+  console.log("🔴 DRIVER SOCKET DISCONNECTED");
+});
 
 const DRIVER_ID = "69aa2faa533f56d3c03a51c5";
 
@@ -17,18 +32,28 @@ const idleRoute = [
 ];
 
 async function getRoute(start, end) {
-  const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${start.lat},${start.lng}&destination=${end.lat},${end.lng}&key=AIzaSyD8F89IMJWc8Sn18ueBxUozeVqut2vG-pM`;
+  try {
+    const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${start.lat},${start.lng}&destination=${end.lat},${end.lng}&key=YOUR_KEY`;
 
-  const res = await axios.get(url);
+    const res = await axios.get(url);
 
-  const points = res.data.routes[0].overview_polyline.points;
+    if (!res.data.routes.length) {
+      console.log("❌ No routes from Google API");
+      return idleRoute; // fallback
+    }
 
-  const decoded = polyline.decode(points);
+    const points = res.data.routes[0].overview_polyline.points;
+    const decoded = polyline.decode(points);
 
-  return decoded.map((p) => ({
-    lat: p[0],
-    lng: p[1],
-  }));
+    return decoded.map((p) => ({
+      lat: p[0],
+      lng: p[1],
+    }));
+  } catch (err) {
+    console.log("❌ ROUTE ERROR:", err.message);
+
+    return idleRoute; // fallback
+  }
 }
 
 let step = 0;
@@ -57,8 +82,8 @@ function startGPS(route, target = null, onArrive = null) {
 
     const start = route[segmentIndex];
     const end = route[segmentIndex + 1];
-    const SPEED = 0.35
-    progress += SPEED // movement speed
+    const SPEED = 0.35;
+    progress += SPEED; // movement speed
 
     const lat = start.lat + (end.lat - start.lat) * progress;
     const lng = start.lng + (end.lng - start.lng) * progress;
@@ -99,7 +124,7 @@ async function startIdleRoaming() {
     lng: currentLocation.lng + (Math.random() - 0.5) * 0.002,
   };
 
-  const roamRoute = await getRoute(currentLocation, roamPoint);
+  const roamRoute = idleRoute;
 
   startGPS(roamRoute, roamPoint, () => {
     if (state === "SEARCHING") {
@@ -107,7 +132,6 @@ async function startIdleRoaming() {
     }
   });
 }
-
 
 socket.on("connect", () => {
   console.log("\n===============================");

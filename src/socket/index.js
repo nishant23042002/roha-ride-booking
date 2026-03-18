@@ -19,6 +19,13 @@ export const initSocket = (server) => {
   io.on("connection", (socket) => {
     console.log("\n🟢 SOCKET CONNECTED:", socket.id);
 
+    // 🔥 Attach identity (important)
+    socket.data.userId = null;
+    socket.data.role = null;
+
+    console.log("📡 Active drivers:", onlineDrivers.size);
+    console.log("📡 Active customers:", onlineCustomers.size);
+
     registerDriverHandlers(socket);
     registerRideHandlers(socket);
 
@@ -36,18 +43,34 @@ export const getIO = () => {
   return io;
 };
 
+// function handleDisconnect(socket) {
+//   for (const [driverId, sockId] of onlineDrivers.entries()) {
+//     if (sockId === socket.id) {
+//       onlineDrivers.delete(driverId);
+//       console.log("Driver disconnected:", driverId);
+//     }
+//   }
+
+//   for (const [customerId, sockId] of onlineCustomers.entries()) {
+//     if (sockId === socket.id) {
+//       onlineCustomers.delete(customerId);
+//       console.log("Customer disconnected:", customerId);
+//     }
+//   }
+// }
+
 function handleDisconnect(socket) {
-  for (const [driverId, sockId] of onlineDrivers.entries()) {
-    if (sockId === socket.id) {
-      onlineDrivers.delete(driverId);
-      console.log("Driver disconnected:", driverId);
-    }
+  const { userId, role } = socket.data;
+
+  if (!userId || !role) return;
+
+  if (role === "driver") {
+    onlineDrivers.delete(userId);
+    console.log("Driver disconnected:", userId);
   }
 
-  for (const [customerId, sockId] of onlineCustomers.entries()) {
-    if (sockId === socket.id) {
-      onlineCustomers.delete(customerId);
-      console.log("Customer disconnected:", customerId);
-    }
+  if (role === "customer") {
+    onlineCustomers.delete(userId);
+    console.log("Customer disconnected:", userId);
   }
 }

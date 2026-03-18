@@ -15,7 +15,13 @@ import { rideLog } from "../utils/rideLogger.js";
 export default function registerRideHandlers(socket) {
   socket.on("register-customer", (customerId) => {
     onlineCustomers.set(customerId, socket.id);
-    console.log("Customer registered:", customerId);
+
+    socket.data.userId = customerId;
+    socket.data.role = "customer";
+
+    socket.join(`customer:${customerId}`);
+
+    console.log("CUSTOMER_CONNECTED", { customerId });
   });
 
   socket.on("accept-ride", async ({ rideId, driverId }) => {
@@ -159,11 +165,18 @@ export default function registerRideHandlers(socket) {
       const io = getIO();
       socket.emit("ride-accepted-success", ride);
 
+      const room = `ride:${ride._id}`;
+
+      socket.join(room);
+
       const customerSocketId = onlineCustomers.get(ride.customer.toString());
 
       if (customerSocketId) {
+        const customerSocket = io.sockets.sockets.get(customerSocketId);
+
+        customerSocket?.join(room);
+
         io.to(customerSocketId).emit("ride-accepted", ride);
-        console.log("📡 Sent ride-accepted to rider");
       }
 
       // notify other drivers ride taken
@@ -537,6 +550,10 @@ export default function registerRideHandlers(socket) {
     } catch (error) {
       socket.emit("ride-error", error.message);
     }
+  });
+
+  socket.on("join-ride-room", ({ rideId }) => {
+    socket.join(`ride:${rideId}`);
   });
 
   //CUSTOMER CANCELLATION

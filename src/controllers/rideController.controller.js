@@ -28,6 +28,9 @@ export const requestRide = async (req, res) => {
       rideType = "private",
     } = req.body;
 
+    console.log("🚀 API HIT: /ride/request");
+    console.log("BODY:", req.body);
+
     // 1️⃣ Validate required fields
     if (
       pickupLongitude === undefined ||
@@ -117,6 +120,9 @@ export const requestRide = async (req, res) => {
       estimatedDistanceKm: fareResult.distanceKm,
       estimatedFare: fareResult.finalFare,
     });
+    console.log("✅ RIDE CREATED:", ride._id);
+    console.log("📍 PICKUP:", pickupLatitude, pickupLongitude);
+
     banner("RIDE CREATED");
 
     rideLog(ride._id, "RIDE_CREATED", "Ride document created successfully", {
@@ -219,7 +225,6 @@ export const requestRide = async (req, res) => {
       .filter((entry) => onlineDrivers.has(entry.driver._id.toString()))
       .slice(0, TOP_DRIVERS);
 
-      
     for (const entry of driversToDispatch) {
       const driver = entry.driver;
 

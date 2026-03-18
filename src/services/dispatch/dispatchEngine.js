@@ -19,6 +19,14 @@ export async function findBestDrivers({
     heartbeatLimit,
   });
 
+  console.log("🚀 findBestDrivers CALLED");
+
+  console.log("INPUT:", {
+    pickupLat,
+    pickupLng,
+    vehicleType,
+    passengerCount,
+  });
   if (!drivers.length) {
     return { drivers: [], radius };
   }

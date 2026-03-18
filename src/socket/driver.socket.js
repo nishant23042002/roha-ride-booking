@@ -2,7 +2,7 @@
 
 import Driver from "../models/Driver.js";
 import Ride from "../models/Ride.js";
-import { onlineDrivers, onlineCustomers, getIO } from "./index.js";
+import { onlineDrivers, getIO } from "./index.js";
 import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
 import { changeDriverState } from "../services/driverState.service.js";
 import { banner, driverLog } from "../utils/rideLogger.js";
@@ -14,11 +14,7 @@ setInterval(() => {
   const io = getIO();
 
   const drivers = Array.from(activeDrivers.values());
-
-  if (drivers.length === 0) return;
-  if (process.env.NODE_ENV === "development") {
-    console.log("📡 Drivers:", drivers.length);
-  }
+  if (!drivers.length) return;
 
   io.to("rider-map-room").emit("nearbyDrivers", drivers);
 }, 1200);
@@ -26,6 +22,11 @@ setInterval(() => {
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
     onlineDrivers.set(driverId, socket.id);
+
+    socket.data.userId = driverId;
+    socket.data.role = "driver";
+
+    socket.join(`driver:${driverId}`);
 
     await changeDriverState({
       driverId,
@@ -38,12 +39,7 @@ export default function registerDriverHandlers(socket) {
 
     banner("DRIVER CONNECTED");
 
-    driverLog(
-      driverId,
-      "CONNECTED",
-      "Driver socket registered and marked online",
-      { socketId: socket.id },
-    );
+    console.log("DRIVER_CONNECTED", { driverId, socketId: socket.id });
   });
 
   socket.on("driver-heartbeat", async (driverId) => {
@@ -80,16 +76,33 @@ export default function registerDriverHandlers(socket) {
 
       const smoothed = smoothLocation(last, { lat, lng });
 
+      console.log("GPS_UPDATE", {
+        driverId,
+        raw: { lat, lng },
+        smoothed,
+      });
+
       driverLastLocations.set(driverId, {
         lat: smoothed.lat,
         lng: smoothed.lng,
         timestamp: Date.now(),
       });
 
+      let heading = 0;
+
+      if (last) {
+        const dx = smoothed.lng - last.lng;
+        const dy = smoothed.lat - last.lat;
+
+        heading = (Math.atan2(dx, dy) * 180) / Math.PI;
+        heading = (heading + 360) % 360;
+      }
+
       activeDrivers.set(driverId, {
         id: driverId,
         latitude: smoothed.lat,
         longitude: smoothed.lng,
+        heading,
       });
 
       let driver = null;
@@ -127,22 +140,16 @@ export default function registerDriverHandlers(socket) {
 
         if (!ride) return;
 
-        const customerSocketId = onlineCustomers.get(ride.customer.toString());
+        // const customerSocketId = onlineCustomers.get(ride.customer.toString());
+        const room = `ride:${ride._id}`;
 
-        if (customerSocketId) {
-          driverLog(
-            driverId,
-            "LOCATION_STREAM",
-            "Driver location streamed to passenger",
-            { rideId: ride._id },
-          );
-          io.to(customerSocketId).emit("driver-location", {
-            driverId,
-            lat: smoothed.lat,
-            lng: smoothed.lng,
-            timestamp: Date.now(),
-          });
-        }
+
+        io.to(room).emit("driver-location-update", {
+          driverId,
+          lat: smoothed.lat,
+          lng: smoothed.lng,
+          timestamp: Date.now(),
+        });
       }
     } catch (err) {
       console.log("\n❌ DRIVER LOCATION ERROR");
@@ -151,32 +158,32 @@ export default function registerDriverHandlers(socket) {
   });
 
   socket.on("join-map-room", (data) => {
-    console.log("🗺️ USER JOINED MAP ROOM:", socket.id, data);
+    console.log("MAP_ROOM_JOIN", { socketId: socket.id, data });
     socket.join("rider-map-room");
   });
 
-  socket.on("disconnect", async () => {
-    for (const [driverId, sockId] of onlineDrivers.entries()) {
-      if (sockId === socket.id) {
-        await changeDriverState({
-          driverId,
-          newState: "offline",
-        });
+  // socket.on("disconnect", async () => {
+  //   for (const [driverId, sockId] of onlineDrivers.entries()) {
+  //     if (sockId === socket.id) {
+  //       await changeDriverState({
+  //         driverId,
+  //         newState: "offline",
+  //       });
 
-        onlineDrivers.delete(driverId);
-        activeDrivers.delete(driverId);
-        driverLastLocations.delete(driverId);
+  //       onlineDrivers.delete(driverId);
+  //       activeDrivers.delete(driverId);
+  //       driverLastLocations.delete(driverId);
 
-        banner("DRIVER DISCONNECTED");
+  //       banner("DRIVER DISCONNECTED");
 
-        driverLog(
-          driverId,
-          "DISCONNECTED",
-          "Driver socket disconnected and marked offline",
-        );
+  //       driverLog(
+  //         driverId,
+  //         "DISCONNECTED",
+  //         "Driver socket disconnected and marked offline",
+  //       );
 
-        break;
-      }
-    }
-  });
+  //       break;
+  //     }
+  //   }
+  // });
 }

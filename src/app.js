@@ -9,8 +9,20 @@ import rideRoutes from "./routes/rideRoutes.route.js";
 
 const app = express();
 
-app.use(cors());
+app.use(
+  cors({
+    origin: true, // allow all (dev)
+    credentials: true,
+    methods: ["GET", "POST"],
+  }),
+);
 app.use(express.json());
+
+// 🔥 REQUEST LOGGER (VERY IMPORTANT)
+app.use((req, res, next) => {
+  console.log(`📡 ${req.method} ${req.url}`);
+  next();
+});
 
 app.get("/", (req, res) => {
   res.send("Roha Ride API Running 🚕");
@@ -19,5 +31,14 @@ app.get("/", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/driver", driverRoutes);
 app.use("/api/ride", rideRoutes);
+
+// 🔥 GLOBAL ERROR HANDLER
+app.use((err, req, res, next) => {
+  console.log("❌ GLOBAL ERROR:", err.message);
+
+  res.status(500).json({
+    message: err.message || "Internal Server Error",
+  });
+});
 
 export default app;

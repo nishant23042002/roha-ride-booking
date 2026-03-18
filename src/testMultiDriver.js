@@ -3,7 +3,9 @@
 import { io } from "socket.io-client";
 import { banner } from "./utils/rideLogger.js";
 
-const SERVER = "http://localhost:5000";
+const socket = io("http://127.0.0.1:5000", {
+  transports: ["websocket"],
+});
 
 const drivers = [
   { id: "69aa2faa533f56d3c03a51c5", lat: 18.4343, lng: 73.1318 },
@@ -18,8 +20,6 @@ banner("MULTI DRIVER SIMULATOR STARTED");
 drivers.forEach((driver) => {
   let wonRide = false;
 
-  const socket = io(SERVER);
-
   socket.on("connect", () => {
     console.log("----------------------------------------------------");
     console.log(`🚗 DRIVER ONLINE`);
@@ -30,9 +30,6 @@ drivers.forEach((driver) => {
     socket.emit("register-driver", driver.id);
 
     console.log(`🟢 DRIVER ${driver.id} REGISTERED`);
-
-    // move to searching state
-    socket.emit("driver-go-online", driver.id);
 
     console.log(`🔍 DRIVER ${driver.id} SEARCHING FOR RIDES\n`);
 

@@ -26,10 +26,14 @@ socket.on("disconnect", () => {
 const DRIVER_ID = "69aa2faa533f56d3c03a51c5";
 
 const idleRoute = [
-  { lat: 18.4343, lng: 73.1318 },
-  { lat: 18.4347, lng: 73.1321 },
-  { lat: 18.4341, lng: 73.1324 },
+  { lat: 18.4384, lng: 73.131 },
+  { lat: 18.439, lng: 73.1321 },
+  { lat: 18.44, lng: 73.133 },
 ];
+const TEST_PICKUP = {
+  lat: 18.43454,
+  lng: 73.131673,
+};
 
 async function getRoute(start, end) {
   try {
@@ -82,8 +86,8 @@ function startGPS(route, target = null, onArrive = null) {
 
     const start = route[segmentIndex];
     const end = route[segmentIndex + 1];
-    const SPEED = 0.35;
-    progress += SPEED; // movement speed
+    const SPEED = 0.015 + Math.random() * 0.01;
+    progress += SPEED;
 
     const lat = start.lat + (end.lat - start.lat) * progress;
     const lng = start.lng + (end.lng - start.lng) * progress;
@@ -118,10 +122,12 @@ function startGPS(route, target = null, onArrive = null) {
   }, 1000);
 }
 
+const BASE_LOCATION = idleRoute[0];
+
 async function startIdleRoaming() {
   const roamPoint = {
-    lat: currentLocation.lat + (Math.random() - 0.5) * 0.002,
-    lng: currentLocation.lng + (Math.random() - 0.5) * 0.002,
+    lat: BASE_LOCATION.lat + (Math.random() - 0.5) * 0.003,
+    lng: BASE_LOCATION.lng + (Math.random() - 0.5) * 0.003,
   };
 
   const roamRoute = idleRoute;

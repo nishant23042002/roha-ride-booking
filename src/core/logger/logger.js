@@ -1,17 +1,11 @@
-export const log = (level, message, meta = {}) => {
-  const time = new Date().toISOString();
+const logTracker = new Map();
 
-  console.log(
-    JSON.stringify({
-      time,
-      level,
-      message,
-      ...meta,
-    }),
-  );
-};
+export function throttledLog(key, interval = 5000, ...args) {
+  const now = Date.now();
+  const lastLog = logTracker.get(key) || 0;
 
-// helpers
-export const info = (msg, meta) => log("INFO", msg, meta);
-export const error = (msg, meta) => log("ERROR", msg, meta);
-export const warn = (msg, meta) => log("WARN", msg, meta);
+  if (now - lastLog > interval) {
+    console.log(...args);
+    logTracker.set(key, now);
+  }
+}

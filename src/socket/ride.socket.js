@@ -11,6 +11,8 @@ import { creditDriverWallet } from "../services/walletService.js";
 import { changeDriverState } from "../services/driverState.service.js";
 import { banner } from "../utils/rideLogger.js";
 import { rideLog } from "../utils/rideLogger.js";
+import { throttledLog } from "../core/logger/logger.js";
+import acceptRideHandler from "./handlers/acceptRide.handler.js";
 
 export default function registerRideHandlers(socket) {
   socket.on("register-customer", (customerId) => {
@@ -21,174 +23,15 @@ export default function registerRideHandlers(socket) {
 
     socket.join(`customer:${customerId}`);
 
-    console.log("CUSTOMER_CONNECTED", { customerId });
+    throttledLog(
+      `customer-connect-${customerId}`,
+      5000,
+      "👤 CUSTOMER_CONNECTED",
+      { customerId },
+    );
   });
 
-  socket.on("accept-ride", async ({ rideId, driverId }) => {
-    try {
-      const result = await withRetry(async () => {
-        const session = await mongoose.startSession();
-        session.startTransaction();
-
-        try {
-          rideLog(
-            rideId,
-            "DRIVER_ACCEPT_ATTEMPT",
-            "Driver attempting to claim ride",
-            { driverId },
-          );
-          // -----------------------------
-          // Fetch Driver
-          // -----------------------------
-
-          const driver = await Driver.findById(driverId).session(session);
-
-          if (!driver) {
-            throw new Error("Driver not found");
-          }
-
-          if (driver.driverState !== "requested") {
-            throw new Error("Driver not available");
-          }
-
-          if (driver.currentRide?.toString() !== rideId) {
-            throw new Error("Driver ride mismatch");
-          }
-
-          const HEARTBEAT_LIMIT = 30000;
-
-          if (
-            !driver.lastHeartbeat ||
-            Date.now() - new Date(driver.lastHeartbeat).getTime() >
-              HEARTBEAT_LIMIT
-          ) {
-            throw new Error("Driver connection unstable");
-          }
-
-          // -----------------------------
-          // Claim Ride (atomic)
-          // -----------------------------
-
-          const ride = await Ride.findOneAndUpdate(
-            {
-              _id: rideId,
-              status: "requested",
-              driver: null,
-            },
-            {
-              $set: {
-                status: "accepted",
-                driver: driverId,
-              },
-            },
-            {
-              returnDocument: "after",
-              session,
-            },
-          );
-
-          if (!ride) {
-            rideLog(
-              rideId,
-              "ACCEPT_REJECTED",
-              "Ride already taken by another driver",
-              { driverId },
-            );
-            throw new Error("Ride already accepted");
-          }
-
-          // -----------------------------
-          // Seat Allocation (shared vehicle)
-          // -----------------------------
-
-          if (driver.vehicleType === "minidoor") {
-            const updatedDriver = await Driver.findOneAndUpdate(
-              {
-                _id: driverId,
-                currentSeatLoad: {
-                  $lte: driver.vehicleCapacity - ride.passengerCount,
-                },
-              },
-              {
-                $inc: { currentSeatLoad: ride.passengerCount },
-              },
-              { new: true, session },
-            );
-
-            if (!updatedDriver) {
-              throw new Error("Not enough seats available");
-            }
-
-            rideLog(
-              rideId,
-              "SEAT_ALLOCATED",
-              "Seat allocated for shared vehicle",
-              {
-                passengerCount: ride.passengerCount,
-                newSeatLoad: updatedDriver.currentSeatLoad,
-              },
-            );
-          }
-
-          // -----------------------------
-          // Driver State Update
-          // -----------------------------
-
-          await changeDriverState({
-            driverId,
-            newState: "to_pickup",
-            rideId,
-            session,
-          });
-
-          await session.commitTransaction();
-          session.endSession();
-
-          banner("RIDE CLAIMED");
-
-          rideLog(
-            rideId,
-            "ACCEPT_SUCCESS",
-            "Driver successfully claimed ride",
-            { driverId },
-          );
-          return { ride };
-        } catch (error) {
-          await session.abortTransaction();
-          session.endSession();
-          throw error;
-        }
-      });
-
-      const { ride } = result;
-
-      const io = getIO();
-      socket.emit("ride-accepted-success", ride);
-
-      const room = `ride:${ride._id}`;
-
-      socket.join(room);
-
-      const customerSocketId = onlineCustomers.get(ride.customer.toString());
-
-      if (customerSocketId) {
-        const customerSocket = io.sockets.sockets.get(customerSocketId);
-
-        customerSocket?.join(room);
-
-        io.to(customerSocketId).emit("ride-accepted", ride);
-      }
-
-      // notify other drivers ride taken
-      for (const [id, sockId] of onlineDrivers.entries()) {
-        if (id !== driverId) {
-          io.to(sockId).emit("ride-taken", rideId);
-        }
-      }
-    } catch (error) {
-      socket.emit("ride-error", error.message);
-    }
-  });
+  socket.on("accept-ride", (data) => acceptRideHandler(socket, data));
 
   socket.on("arrive-ride", async ({ rideId, driverId }) => {
     try {
@@ -197,7 +40,11 @@ export default function registerRideHandlers(socket) {
         session.startTransaction();
 
         try {
-          banner("DRIVER ARRIVING");
+          throttledLog(
+            `arrive-${driverId}`,
+            3000,
+            `📍 DRIVER ARRIVING → ${driverId}`,
+          );
 
           rideLog(
             rideId,
@@ -284,13 +131,11 @@ export default function registerRideHandlers(socket) {
         try {
           banner("RIDE STARTING");
 
-          rideLog(
-            rideId,
-            "START_RIDE_ATTEMPT",
-            "Driver attempting to start ride",
-            { driverId },
+          throttledLog(
+            `start-${driverId}`,
+            3000,
+            `🚦 START RIDE → ${driverId}`,
           );
-
           const ride = await Ride.findOne({
             _id: rideId,
             driver: driverId,

@@ -6,6 +6,7 @@ import { onlineDrivers, getIO } from "./index.js";
 import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
 import { changeDriverState } from "../services/driverState.service.js";
 import { banner, driverLog } from "../utils/rideLogger.js";
+import { throttledLog } from "../core/logger/logger.js";
 
 const activeDrivers = new Map();
 const driverLastLocations = new Map();
@@ -47,7 +48,7 @@ export default function registerDriverHandlers(socket) {
       lastHeartbeat: new Date(),
     });
 
-    driverLog(driverId, "HEARTBEAT", "Driver connection alive");
+    throttledLog(`heartbeat-${driverId}`, 5000, `💓 HEARTBEAT → ${driverId}`);
   });
 
   socket.on("driver-location-update", async ({ driverId, lat, lng }) => {
@@ -64,11 +65,10 @@ export default function registerDriverHandlers(socket) {
         const speed = distance / (timeDiff / 3600); // km/h
 
         if (speed > 150) {
-          driverLog(
-            driverId,
-            "GPS_REJECTED",
-            "Unrealistic GPS speed detected",
-            { speed: speed.toFixed(2) + "km/h" },
+          throttledLog(
+            `gps-reject-${driverId}`,
+            5000,
+            `❌ GPS_REJECTED → ${driverId}`,
           );
           return;
         }
@@ -76,16 +76,18 @@ export default function registerDriverHandlers(socket) {
 
       const smoothed = smoothLocation(last, { lat, lng });
 
-      console.log("GPS_UPDATE", {
+      const now = Date.now();
+
+      throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE", {
         driverId,
-        raw: { lat, lng },
-        smoothed,
+        lat: smoothed.lat,
+        lng: smoothed.lng,
       });
 
       driverLastLocations.set(driverId, {
         lat: smoothed.lat,
         lng: smoothed.lng,
-        timestamp: Date.now(),
+        timestamp: now,
       });
 
       let heading = 0;
@@ -124,12 +126,7 @@ export default function registerDriverHandlers(socket) {
         return; // 🚨 STOP further execution
       }
 
-      // Broadcast driver location to all connected rider apps
-
-      driverLog(driverId, "GPS_UPDATE", "Driver location updated", {
-        lat: smoothed.lat.toFixed(6),
-        lng: smoothed.lng.toFixed(6),
-      });
+      // Broadcast driver location to all connected rider app
 
       if (!driver) return;
 
@@ -142,7 +139,6 @@ export default function registerDriverHandlers(socket) {
 
         // const customerSocketId = onlineCustomers.get(ride.customer.toString());
         const room = `ride:${ride._id}`;
-
 
         io.to(room).emit("driver-location-update", {
           driverId,
@@ -158,7 +154,10 @@ export default function registerDriverHandlers(socket) {
   });
 
   socket.on("join-map-room", (data) => {
-    console.log("MAP_ROOM_JOIN", { socketId: socket.id, data });
+    throttledLog(`map-room-${socket.id}`, 5000, "MAP_ROOM_JOIN", {
+      socketId: socket.id,
+      data,
+    });
     socket.join("rider-map-room");
   });
 

@@ -1,14 +1,12 @@
 // src/controller/rideController.controller.js
 
 import Ride from "../models/Ride.js";
-import Driver from "../models/Driver.js";
 import { getIO, onlineDrivers } from "../socket/index.js";
 import { calculateETA } from "../utils/eta.js";
 import { calculateFare } from "../services/pricing/priceEngine.js";
 import { vehicleRules } from "../config/vehicleRules.js";
 import User from "../models/User.js";
 import mongoose from "mongoose";
-import { changeDriverState } from "../services/driverState.service.js";
 import { rideLog } from "../utils/rideLogger.js";
 import { banner } from "../utils/rideLogger.js";
 import { findBestDrivers } from "../services/dispatch/dispatchEngine.js";
@@ -27,9 +25,6 @@ export const requestRide = async (req, res) => {
       passengerCount = 1,
       rideType = "private",
     } = req.body;
-
-    console.log("🚀 API HIT: /ride/request");
-    console.log("BODY:", req.body);
 
     // 1️⃣ Validate required fields
     if (
@@ -120,10 +115,10 @@ export const requestRide = async (req, res) => {
       estimatedDistanceKm: fareResult.distanceKm,
       estimatedFare: fareResult.finalFare,
     });
-    console.log("✅ RIDE CREATED:", ride._id);
-    console.log("📍 PICKUP:", pickupLatitude, pickupLongitude);
 
     banner("RIDE CREATED");
+    console.log("✅ RIDE CREATED:", ride._id);
+    console.log("📍 PICKUP:", pickupLatitude, pickupLongitude);
 
     rideLog(ride._id, "RIDE_CREATED", "Ride document created successfully", {
       vehicleType,
@@ -163,6 +158,7 @@ export const requestRide = async (req, res) => {
     //     },
     //   },
     // }).limit(5);
+
     const { drivers: rankedDrivers, radius } = await findBestDrivers({
       pickupLat: pickupLatitude,
       pickupLng: pickupLongitude,
@@ -230,12 +226,6 @@ export const requestRide = async (req, res) => {
 
       console.log(`Dispatching driver ${driver._id} ETA=${entry.etaMinutes}`);
 
-      await changeDriverState({
-        driverId: driver._id,
-        newState: "requested",
-        rideId: ride._id,
-      });
-
       const socketId = onlineDrivers.get(driver._id.toString());
 
       if (socketId) {
@@ -243,10 +233,30 @@ export const requestRide = async (req, res) => {
       }
     }
 
+    setTimeout(async () => {
+      const freshRide = await Ride.findById(ride._id);
+
+      // if still not accepted → retry or cancel
+      if (freshRide && freshRide.status === "requested") {
+        console.log("⏳ DISPATCH TIMEOUT → retrying or cancelling");
+
+        // OPTION 1: retry dispatch
+        // OPTION 2: mark failed
+
+        freshRide.status = "cancelled";
+        freshRide.cancelledBy = "system";
+        freshRide.cancelReason = "No drivers accepted";
+
+        await freshRide.save();
+
+        rideLog(ride._id, "DISPATCH_TIMEOUT", "No driver accepted ride");
+      }
+    }, 10000); // 10sec
+
     res.status(201).json({
       message: "Ride requested successfully",
       ride,
-      notifiedDrivers: rankedDrivers.length,
+      notifiedDrivers: driversToDispatch.length,
     });
   } catch (error) {
     console.log("\n❌ RIDE REQUEST ERROR");

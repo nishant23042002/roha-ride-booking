@@ -5,22 +5,17 @@ import { haversineDistance } from "./utils/gpsUtils.js";
 import { banner, logState } from "./utils/rideLogger.js";
 import axios from "axios";
 import polyline from "@mapbox/polyline";
+import readline from "readline";
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+});
+
 console.log("🚀 TEST SCRIPT STARTED");
 
 const socket = io("http://127.0.0.1:5000", {
   transports: ["websocket"],
-});
-
-socket.on("connect", () => {
-  console.log("🟢 DRIVER SOCKET CONNECTED:", socket.id);
-});
-
-socket.on("connect_error", (err) => {
-  console.log("❌ SOCKET CONNECTION ERROR:", err.message);
-});
-
-socket.on("disconnect", () => {
-  console.log("🔴 DRIVER SOCKET DISCONNECTED");
 });
 
 const DRIVER_ID = "69aa2faa533f56d3c03a51c5";
@@ -30,11 +25,135 @@ const idleRoute = [
   { lat: 18.439, lng: 73.1321 },
   { lat: 18.44, lng: 73.133 },
 ];
-const TEST_PICKUP = {
-  lat: 18.43454,
-  lng: 73.131673,
-};
 
+let currentRide = null;
+let currentLocation = idleRoute[0];
+let heartbeatInterval = null;
+let gpsInterval = null;
+let state = "IDLE";
+let isOnline = false;
+
+function showMenu() {
+  console.log(`
+==============================
+🚗 DRIVER CONTROL PANEL
+==============================
+1. Go Online
+2. Accept Ride
+3. Cancel Ride (Driver)
+4. Arrive
+5. Start Ride
+6. Complete Ride
+7. Cancel Ride (Customer)
+==============================
+`);
+}
+
+// ---------------- CLI HANDLER ----------------
+
+rl.on("line", (input) => {
+  const command = input.trim();
+
+  if (!/^[1-8]$/.test(command)) {
+    console.log("❓ Invalid input");
+    showMenu();
+    return;
+  }
+  switch (command) {
+    case "1":
+      if (!isOnline) {
+        socket.emit("register-driver", DRIVER_ID); // 🔥 IMPORTANT
+        socket.emit("driver-go-online", DRIVER_ID);
+
+        console.log("🟢 Driver ONLINE");
+        isOnline = true;
+
+        updateState("SEARCHING");
+
+        startIdleRoaming(); // restart GPS
+      } else {
+        socket.emit("driver-go-offline", DRIVER_ID);
+
+        console.log("🔴 Driver OFFLINE");
+        isOnline = false;
+
+        if (gpsInterval) {
+          clearInterval(gpsInterval);
+          gpsInterval = null;
+        }
+
+        if (heartbeatInterval) {
+          clearInterval(heartbeatInterval);
+          heartbeatInterval = null;
+        }
+      }
+      break;
+
+    case "2":
+      if (!currentRide) return console.log("❌ No ride available");
+      socket.emit("accept-ride", {
+        rideId: currentRide._id,
+        driverId: DRIVER_ID,
+      });
+      break;
+
+    case "3":
+      if (!currentRide) return console.log("❌ No ride");
+
+      socket.emit("cancel-ride-by-driver", {
+        rideId: currentRide._id,
+        driverId: DRIVER_ID,
+        reason: "Driver rejected before accepting",
+      });
+
+      break;
+
+    case "4":
+      if (!currentRide) return console.log("❌ No active ride");
+      socket.emit("arrive-ride", {
+        rideId: currentRide._id,
+        driverId: DRIVER_ID,
+      });
+      break;
+
+    case "5":
+      if (!currentRide) return console.log("❌ No active ride");
+      if (state !== "ARRIVED") {
+        return console.log("❌ Cannot start before arrival");
+      }
+      socket.emit("start-ride", {
+        rideId: currentRide._id,
+        driverId: DRIVER_ID,
+      });
+      break;
+
+    case "6":
+      if (!currentRide) return console.log("❌ No active ride");
+      if (state !== "ON_TRIP") {
+        return console.log("❌ Cannot complete before starting ride");
+      }
+      socket.emit("complete-ride", {
+        rideId: currentRide._id,
+        driverId: DRIVER_ID,
+      });
+      break;
+
+    case "7":
+      if (!currentRide) return console.log("❌ No active ride");
+      socket.emit("cancel-ride-by-customer", {
+        rideId: currentRide._id,
+        reason: "Customer cancelled via CLI",
+      });
+      break;
+
+    default:
+      console.log("❓ Unknown command");
+  }
+
+  showMenu();
+});
+
+// ---------------- ROUTE ----------------
 async function getRoute(start, end) {
   try {
     const url = `https://maps.googleapis.com/maps/api/directions/json?origin=${start.lat},${start.lng}&destination=${end.lat},${end.lng}&key=YOUR_KEY`;
@@ -60,11 +179,7 @@ async function getRoute(start, end) {
   }
 }
 
-let step = 0;
-let gpsInterval = null;
-let currentLocation = idleRoute[0];
-let state = "IDLE";
-
+// ---------------- STATE ----------------
 function updateState(newState) {
   logState(state, newState);
   state = newState;
@@ -125,6 +240,8 @@ function startGPS(route, target = null, onArrive = null) {
 const BASE_LOCATION = idleRoute[0];
 
 async function startIdleRoaming() {
+  if (gpsInterval) return; // 🚨 prevent duplicate loops
+
   const roamPoint = {
     lat: BASE_LOCATION.lat + (Math.random() - 0.5) * 0.003,
     lng: BASE_LOCATION.lng + (Math.random() - 0.5) * 0.003,
@@ -139,6 +256,7 @@ async function startIdleRoaming() {
   });
 }
 
+// ---------------- SOCKET EVENTS ----------------
 socket.on("connect", () => {
   console.log("\n===============================");
   banner("DRIVER SIMULATOR STARTED");
@@ -151,25 +269,32 @@ socket.on("connect", () => {
 
   socket.emit("driver-go-online", DRIVER_ID);
 
+  // ✅ STEP 2: wait a bit (important)
+  setTimeout(() => {
+    startIdleRoaming(); // GPS starts AFTER registration
+  }, 1000);
+
   updateState("SEARCHING");
 
-  setInterval(() => {
-    socket.emit("driver-heartbeat", DRIVER_ID);
-    console.log("💓 Heartbeat sent");
-  }, 10000);
+  if (!heartbeatInterval) {
+    heartbeatInterval = setInterval(() => {
+      socket.emit("driver-heartbeat", DRIVER_ID);
+      console.log("💓 Heartbeat sent");
+    }, 10000);
+  }
 
   console.log("\n🛰 Driver roaming in idle mode\n");
-
-  startIdleRoaming();
 });
 
 socket.on("new-ride", async (ride) => {
   if (gpsInterval) clearInterval(gpsInterval);
   banner("NEW RIDE REQUEST RECEIVED");
 
+  currentRide = ride;
+
   console.log("🆔 Ride ID:", ride._id);
   console.log("👤 Customer:", ride.customer);
-  console.log("🚘 Vehicle:", ride.vehicleType);
+  console.log("🚘 Vehicle:", ride.vehicleType || "N/A");
   console.log("👥 Passengers:", ride.passengerCount);
   console.log("📦 Ride Type:", ride.rideType);
 
@@ -187,19 +312,18 @@ socket.on("new-ride", async (ride) => {
 
   updateState("REQUESTED");
 
-  console.log("\n⚡ Accepting ride...\n");
+  console.log("\n⏳ Waiting for driver action...\n");
 
-  setTimeout(() => {
-    socket.emit("accept-ride", {
-      rideId: ride._id,
-      driverId: DRIVER_ID,
-    });
-  }, 4000);
+  //ACCEPT RIDE
+  console.log("\n👉 Press 2 to ACCEPT or 3 to REJECT\n");
+
+  showMenu();
 });
 
 socket.on("ride-accepted-success", async (ride) => {
   banner("RIDE ACCEPTED");
 
+  currentRide = ride;
   updateState("TO_PICKUP");
 
   console.log("🧭 Navigating to pickup location");
@@ -212,12 +336,9 @@ socket.on("ride-accepted-success", async (ride) => {
   const dynamicRoute = await getRoute(currentLocation, pickup);
 
   startGPS(dynamicRoute, pickup, () => {
-    console.log("\n📍 Driver reached pickup location\n");
+    console.log("\n📍 Reached pickup location\n");
 
-    socket.emit("arrive-ride", {
-      rideId: ride._id,
-      driverId: DRIVER_ID,
-    });
+    console.log("👉 Press 4 to ARRIVE\n");
   });
 });
 
@@ -230,14 +351,8 @@ socket.on("ride-arrived", (ride) => {
 
   console.log("⏰ Waiting for passenger");
 
-  setTimeout(() => {
-    console.log("\n🚦 STARTING RIDE\n");
-
-    socket.emit("start-ride", {
-      rideId: ride._id,
-      driverId: DRIVER_ID,
-    });
-  }, 6000);
+  //START RIDE
+  console.log("👉 Press 5 to START RIDE\n");
 });
 
 socket.on("ride-started", async (ride) => {
@@ -260,12 +375,9 @@ socket.on("ride-started", async (ride) => {
 
   const tripRoute = await getRoute(pickup, drop);
   startGPS(tripRoute, drop, () => {
-    console.log("\n🏁 REACHED DESTINATION\n");
+    console.log("\n🏁 Reached destination\n");
 
-    socket.emit("complete-ride", {
-      rideId: ride._id,
-      driverId: DRIVER_ID,
-    });
+    console.log("👉 Press 6 to COMPLETE RIDE\n");
   });
 });
 
@@ -286,9 +398,26 @@ socket.on("ride-completed", (ride) => {
 
   console.log("💵 Waiting Charge:", ride.waitingCharge);
 
+  currentRide = null;
   updateState("SEARCHING");
 
   console.log("\n🚗 Driver returning to idle roaming\n");
+
+  console.log("\n🚗 Back to searching...\n");
+  startIdleRoaming();
+});
+
+socket.on("ride-cancelled", (ride) => {
+  banner("RIDE CANCELLED");
+
+  console.log("❌ Cancelled By:", ride.cancelledBy);
+  console.log("📝 Reason:", ride.cancelReason);
+
+  currentRide = null;
+
+  updateState("SEARCHING");
+
+  console.log("\n🚗 Back to searching...\n");
 
   startIdleRoaming();
 });
@@ -305,4 +434,13 @@ socket.on("tier-upgraded", (data) => {
   console.log("\n🔥 DRIVER TIER UPGRADED");
   console.log("New Tier:", data.newTier);
   console.log("Commission:", data.commissionPercent + "%\n");
+});
+
+socket.on("disconnect", () => {
+  console.log("🔴 DRIVER SOCKET DISCONNECTED");
+
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
 });

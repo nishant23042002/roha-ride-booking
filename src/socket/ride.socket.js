@@ -8,6 +8,7 @@ import startRideHandler from "./handlers/startRide.handler.js";
 import completeRideHandler from "./handlers/completeRide.handler.js";
 import cancelRideByCustomerHandler from "./handlers/cancelRideByCustomer.handler.js";
 import cancelRideByDriverHandler from "./handlers/cancelRideByDriver.handler.js";
+import { rateLimit } from "../core/rateLimiter.js";
 
 export default function registerRideHandlers(socket) {
   socket.on("register-customer", (customerId) => {
@@ -26,30 +27,56 @@ export default function registerRideHandlers(socket) {
     );
   });
 
-  //ACCEPT RIDE
-  socket.on("accept-ride", (data) => acceptRideHandler(socket, data));
+  // =============================
+  // ACCEPT RIDE
+  // =============================
+  socket.on("accept-ride", (data) => {
+    if (!rateLimit(`accept-${socket.data.userId}`, 5, 3000)) return;
+    acceptRideHandler(socket, data);
+  });
 
-  //ARRIVE RIDE
-  socket.on("arrive-ride", (data) => arriveRideHandler(socket, data));
+  // =============================
+  // ARRIVE
+  // =============================
+  socket.on("arrive-ride", (data) => {
+    if (!rateLimit(`arrive-${socket.data.userId}`, 5, 3000)) return;
+    arriveRideHandler(socket, data);
+  });
 
-  //START RIDE
-  socket.on("start-ride", (data) => startRideHandler(socket, data));
+  // =============================
+  // START
+  // =============================
+  socket.on("start-ride", (data) => {
+    if (!rateLimit(`start-${socket.data.userId}`, 5, 3000)) return;
+    startRideHandler(socket, data);
+  });
 
-  //COMPLETE RIDE
-  socket.on("complete-ride", (data) => completeRideHandler(socket, data));
+  // =============================
+  // COMPLETE
+  // =============================
+  socket.on("complete-ride", (data) => {
+    if (!rateLimit(`complete-${socket.data.userId}`, 5, 3000)) return;
+    completeRideHandler(socket, data);
+  });
 
   //JOIN RIDE ROOM
   socket.on("join-ride-room", ({ rideId }) => {
     socket.join(`ride:${rideId}`);
   });
 
-  //CUSTOMER CANCELLATION
-  socket.on("cancel-ride-by-customer", (data) =>
-    cancelRideByCustomerHandler(socket, data),
-  );
+  // =============================
+  // CUSTOMER CANCEL
+  // =============================
+  socket.on("cancel-ride-by-customer", (data) => {
+    if (!rateLimit(`cancel-customer-${socket.data.userId}`, 5, 3000)) return;
+    cancelRideByCustomerHandler(socket, data);
+  });
 
-  //DRIVER CANCELLATION
-  socket.on("cancel-ride-by-driver", (data) =>
-    cancelRideByDriverHandler(socket, data),
-  );
+  // =============================
+  // DRIVER CANCEL (SMART CANCEL)
+  // =============================
+  socket.on("cancel-ride-by-driver", (data) => {
+    if (!rateLimit(`cancel-driver-${socket.data.userId}`, 5, 3000)) return;
+    cancelRideByDriverHandler(socket, data);
+  });
 }

@@ -4,6 +4,7 @@ import { acceptRideService } from "../../services/ride/acceptRide.service.js";
 import { withRetry } from "../../utils/withRetry.js";
 import { getIO, onlineCustomers, onlineDrivers } from "../index.js";
 
+
 export default async function acceptRideHandler(socket, { rideId, driverId }) {
   try {
     const ride = await withRetry(() => acceptRideService({ rideId, driverId }));

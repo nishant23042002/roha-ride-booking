@@ -53,7 +53,7 @@ const rideSchema = new mongoose.Schema(
 
     cancelledBy: {
       type: String,
-      enum: ["customer", "driver", null],
+      enum: ["customer", "driver", "system"],
       default: null,
     },
 
@@ -144,6 +144,7 @@ const rideSchema = new mongoose.Schema(
 );
 
 rideSchema.index({ pickupLocation: "2dsphere" });
+rideSchema.index({ status: 1, driver: 1 });
 
 const Ride = mongoose.model("Ride", rideSchema);
 

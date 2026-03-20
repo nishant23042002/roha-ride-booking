@@ -137,6 +137,8 @@ export async function completeRideService({ rideId, driverId }) {
     // 8️⃣ Reset Driver
     // -----------------------------
     driver.currentRide = null;
+    driver.driverState = "searching";
+    driver.isOnline = true; // ensure available
 
     await changeDriverState({
       driverId,

@@ -2,7 +2,7 @@
 
 import { radiusDriverSearch } from "./radiusSearch.js";
 import { calculateDriverETA } from "./etaCalculator.js";
-import { rankDrivers } from "./driverRanking.js";
+import { rankDrivers } from "./rankDrivers.js";
 
 export async function findBestDrivers({
   pickupLat,

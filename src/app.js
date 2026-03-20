@@ -6,6 +6,7 @@ import cors from "cors";
 import authRoutes from "./routes/authRoutes.route.js";
 import driverRoutes from "./routes/driverRoutes.route.js";
 import rideRoutes from "./routes/rideRoutes.route.js";
+import syncRoutes from "./routes/sync.routes.js"
 
 const app = express();
 
@@ -31,6 +32,7 @@ app.get("/", (req, res) => {
 app.use("/api/auth", authRoutes);
 app.use("/api/driver", driverRoutes);
 app.use("/api/ride", rideRoutes);
+app.use("/api/sync", syncRoutes)
 
 // 🔥 GLOBAL ERROR HANDLER
 app.use((err, req, res, next) => {

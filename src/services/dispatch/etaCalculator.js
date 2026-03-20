@@ -14,6 +14,11 @@ export function calculateDriverETA(driver, pickupLat, pickupLng) {
 
   const distance = haversineDistance(lat, lng, pickupLat, pickupLng);
 
+  if (distance > 0.5) {
+    // >500m jump
+    return; // reject
+  }
+
   const speed = AVG_SPEED[driver.vehicleType] || 25;
 
   const etaMinutes = (distance / speed) * 60;

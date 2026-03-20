@@ -12,28 +12,13 @@ export async function radiusDriverSearch({
   passengerCount,
   heartbeatLimit,
 }) {
-  console.log("\n========== DISPATCH DEBUG ==========");
-  console.log("📍 Pickup:", pickupLat, pickupLng);
-  console.log("🚗 Vehicle:", vehicleType);
-
-  const allDrivers = await Driver.find({});
-  console.log("👥 TOTAL DRIVERS:", allDrivers.length);
-
-  allDrivers.forEach((d) => {
-    console.log("----");
-    console.log("ID:", d._id);
-    console.log("STATE:", d.driverState);
-    console.log("VEHICLE:", d.vehicleType);
-    console.log("HEARTBEAT:", d.lastHeartbeat);
-    console.log("LOCATION:", d.currentLocation);
-  });
-
   for (const radius of SEARCH_RADII) {
     console.log(`🔍 Searching drivers within ${radius} meters`);
 
     const drivers = await Driver.find({
       vehicleType,
       driverState: "searching",
+      isOnline: true,
       vehicleCapacity: { $gte: passengerCount },
       lastHeartbeat: {
         $gte: new Date(Date.now() - heartbeatLimit),
@@ -47,7 +32,7 @@ export async function radiusDriverSearch({
           $maxDistance: radius,
         },
       },
-    });
+    }).limit(20); 
 
     drivers.forEach((d) => {
       const [lng, lat] = d.currentLocation.coordinates;

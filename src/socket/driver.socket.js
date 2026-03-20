@@ -4,24 +4,42 @@ import Driver from "../models/Driver.js";
 import Ride from "../models/Ride.js";
 import { onlineDrivers, getIO } from "./index.js";
 import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
-import { changeDriverState } from "../services/driverState.service.js";
-import { banner, driverLog } from "../utils/rideLogger.js";
+import { disconnectTimers } from "./index.js";
 import { throttledLog } from "../core/logger/logger.js";
+import { rateLimit } from "../core/rateLimiter.js";
 
 const activeDrivers = new Map();
 const driverLastLocations = new Map();
 
+// Broadcast drivers to map (throttled)
 setInterval(() => {
   const io = getIO();
-
   const drivers = Array.from(activeDrivers.values());
   if (!drivers.length) return;
 
   io.to("rider-map-room").emit("nearbyDrivers", drivers);
-}, 1200);
+}, 1500);
 
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
+    const io = getIO();
+
+    // 🔥 Kill old socket
+    if (onlineDrivers.has(driverId)) {
+      const oldId = onlineDrivers.get(driverId);
+
+      if (oldId !== socket.id) {
+        const old = io.sockets.sockets.get(oldId);
+        if (old) old.disconnect(true);
+      }
+    }
+
+    // 🔥 Cancel disconnect timer
+    if (disconnectTimers.has(driverId)) {
+      clearTimeout(disconnectTimers.get(driverId));
+      disconnectTimers.delete(driverId);
+    }
+
     onlineDrivers.set(driverId, socket.id);
 
     socket.data.userId = driverId;
@@ -29,21 +47,51 @@ export default function registerDriverHandlers(socket) {
 
     socket.join(`driver:${driverId}`);
 
-    await changeDriverState({
-      driverId,
-      newState: "searching",
-    });
+    console.log("✅ DRIVER REGISTERED:", driverId);
+    console.log("📡 Active drivers:", onlineDrivers.size);
 
+    // 🔥 Fetch driver
+    const driver = await Driver.findById(driverId);
+
+    if (!driver) return;
+
+    // ==================================================
+    // 🚨 CRITICAL FIX — VALIDATE currentRide
+    // ==================================================
+    if (driver.currentRide) {
+      const ride = await Ride.findById(driver.currentRide);
+
+      if (!ride || ["completed", "cancelled"].includes(ride.status)) {
+        // ❌ stale ride → CLEAN IT
+        console.log("🧹 Cleaning stale currentRide:", driver.currentRide);
+
+        driver.currentRide = null;
+        driver.driverState = "searching";
+
+        await driver.save();
+      } else {
+        // ✅ valid ride → RESUME
+        console.log("🔁 Resuming ride:", ride._id);
+
+        socket.join(`ride:${ride._id}`);
+
+        socket.emit("resume-ride", {
+          rideId: ride._id,
+          state: driver.driverState,
+        });
+      }
+    }
+
+    // 🔥 Mark online AFTER cleanup
     await Driver.findByIdAndUpdate(driverId, {
+      isOnline: true,
       lastHeartbeat: new Date(),
     });
-
-    banner("DRIVER CONNECTED");
-
-    console.log("DRIVER_CONNECTED", { driverId, socketId: socket.id });
   });
 
   socket.on("driver-heartbeat", async (driverId) => {
+    if (!rateLimit(`hb-${driverId}`, 5, 5000)) return;
+
     await Driver.findByIdAndUpdate(driverId, {
       lastHeartbeat: new Date(),
     });
@@ -53,7 +101,9 @@ export default function registerDriverHandlers(socket) {
 
   socket.on("driver-location-update", async ({ driverId, lat, lng }) => {
     try {
-      if (!driverId || lat === undefined || lng === undefined) return;
+      if (!rateLimit(`gps-${driverId}`, 20, 5000)) return;
+      if (!driverId || lat == null || lng == null) return;
+
       const last = driverLastLocations.get(driverId);
 
       // Prevent unrealistic GPS jumps
@@ -64,7 +114,7 @@ export default function registerDriverHandlers(socket) {
 
         const speed = distance / (timeDiff / 3600); // km/h
 
-        if (speed > 150) {
+        if (speed > 200 || distance > 1) {
           throttledLog(
             `gps-reject-${driverId}`,
             5000,
@@ -78,11 +128,7 @@ export default function registerDriverHandlers(socket) {
 
       const now = Date.now();
 
-      throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE", {
-        driverId,
-        lat: smoothed.lat,
-        lng: smoothed.lng,
-      });
+      throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE");
 
       driverLastLocations.set(driverId, {
         lat: smoothed.lat,
@@ -106,7 +152,6 @@ export default function registerDriverHandlers(socket) {
         longitude: smoothed.lng,
         heading,
       });
-
       let driver = null;
 
       try {
@@ -126,8 +171,6 @@ export default function registerDriverHandlers(socket) {
         return; // 🚨 STOP further execution
       }
 
-      // Broadcast driver location to all connected rider app
-
       if (!driver) return;
 
       // If driver has ride → stream location to passenger
@@ -138,7 +181,7 @@ export default function registerDriverHandlers(socket) {
         if (!ride) return;
 
         // const customerSocketId = onlineCustomers.get(ride.customer.toString());
-        const room = `ride:${ride._id}`;
+        const room = `ride:${driver.currentRide}`;
 
         io.to(room).emit("driver-location-update", {
           driverId,
@@ -153,36 +196,44 @@ export default function registerDriverHandlers(socket) {
     }
   });
 
-  socket.on("join-map-room", (data) => {
-    throttledLog(`map-room-${socket.id}`, 5000, "MAP_ROOM_JOIN", {
-      socketId: socket.id,
-      data,
-    });
-    socket.join("rider-map-room");
+  socket.on("driver-go-online", async (driverId) => {
+    try {
+      await Driver.findByIdAndUpdate(driverId, {
+        isOnline: true,
+        driverState: "searching",
+        lastHeartbeat: new Date(),
+      });
+
+      activeDrivers.delete(driverId);
+      driverLastLocations.delete(driverId);
+
+      console.log("🟢 DRIVER ONLINE:", driverId);
+    } catch (err) {
+      console.log("❌ GO ONLINE ERROR:", err.message);
+    }
   });
 
-  // socket.on("disconnect", async () => {
-  //   for (const [driverId, sockId] of onlineDrivers.entries()) {
-  //     if (sockId === socket.id) {
-  //       await changeDriverState({
-  //         driverId,
-  //         newState: "offline",
-  //       });
+  socket.on("driver-go-offline", async (driverId) => {
+    try {
+      await Driver.findByIdAndUpdate(driverId, {
+        isOnline: false,
+        driverState: "offline",
+        currentRide: null,
+      });
 
-  //       onlineDrivers.delete(driverId);
-  //       activeDrivers.delete(driverId);
-  //       driverLastLocations.delete(driverId);
+      activeDrivers.delete(driverId);
+      driverLastLocations.delete(driverId);
 
-  //       banner("DRIVER DISCONNECTED");
+      onlineDrivers.delete(driverId);
 
-  //       driverLog(
-  //         driverId,
-  //         "DISCONNECTED",
-  //         "Driver socket disconnected and marked offline",
-  //       );
+      console.log("🔴 DRIVER OFFLINE:", driverId);
+    } catch (err) {
+      console.log("❌ GO OFFLINE ERROR:", err.message);
+    }
+  });
 
-  //       break;
-  //     }
-  //   }
-  // });
+  socket.on("join-map-room", (data) => {
+    throttledLog(`map-room-${socket.id}`, 5000, "MAP_ROOM_JOIN");
+    socket.join("rider-map-room");
+  });
 }

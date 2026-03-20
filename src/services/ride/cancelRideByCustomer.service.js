@@ -1,5 +1,3 @@
-// /src/services/ride/cancelRideByCustomerService.js
-
 import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
@@ -13,15 +11,10 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     session.startTransaction();
 
     const ride = await Ride.findById(rideId).session(session);
-
     if (!ride) throw new Error("Ride not found");
 
-    // ✅ IDEMPOTENT CHECK
-    if (ride.status === "cancelled") {
-      return ride;
-    }
+    if (ride.status === "cancelled") return ride;
 
-    // ✅ VALID STATES
     if (!["requested", "accepted", "arrived"].includes(ride.status)) {
       throw new Error("Ride cannot be cancelled");
     }
@@ -30,22 +23,19 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     ride.cancelledBy = "customer";
     ride.cancelReason = reason || "No reason provided";
 
+    await ride.save({ session });
+
     banner("RIDE CANCELLED");
 
     rideLog(ride._id, "CUSTOMER_CANCELLED", "Cancelled by customer", {
       reason: ride.cancelReason,
     });
 
-    await ride.save({ session });
-
-    // -----------------------------
-    // HANDLE DRIVER RESET
-    // -----------------------------
+    // reset driver
     if (ride.driver) {
       const driver = await Driver.findById(ride.driver).session(session);
 
       if (driver) {
-        // shared vehicle fix
         if (driver.vehicleType === "minidoor") {
           driver.currentSeatLoad -= ride.passengerCount;
           if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;

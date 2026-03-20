@@ -3,10 +3,13 @@
 import { Server } from "socket.io";
 import registerDriverHandlers from "./driver.socket.js";
 import registerRideHandlers from "./ride.socket.js";
+import Driver from "../models/Driver.js";
 
 let io;
 export const onlineDrivers = new Map(); // driverId -> socketId
 export const onlineCustomers = new Map(); // customerId -> socketId
+export const disconnectTimers = new Map(); // userId -> timeout
+const DISCONNECT_GRACE = 30000; // 30 sec
 
 export const initSocket = (server) => {
   io = new Server(server, {
@@ -64,13 +67,30 @@ function handleDisconnect(socket) {
 
   if (!userId || !role) return;
 
-  if (role === "driver") {
-    onlineDrivers.delete(userId);
-    console.log("Driver disconnected:", userId);
-  }
+  console.log(`⏳ ${role} disconnected (grace period):`, userId);
 
-  if (role === "customer") {
-    onlineCustomers.delete(userId);
-    console.log("Customer disconnected:", userId);
-  }
+  const timer = setTimeout(async () => {
+    if (role === "driver") {
+      onlineDrivers.delete(userId);
+
+      console.log("❌ Driver marked offline:", userId);
+
+      // 🔥 OPTIONAL: update DB
+      await Driver.findByIdAndUpdate(userId, {
+        isOnline: false,
+        driverState: "offline",
+      });
+
+      console.log("❌ Driver offline:", userId);
+    }
+
+    if (role === "customer") {
+      onlineCustomers.delete(userId);
+      console.log("❌ Customer removed:", userId);
+    }
+
+    disconnectTimers.delete(userId);
+  }, DISCONNECT_GRACE);
+
+  disconnectTimers.set(userId, timer);
 }

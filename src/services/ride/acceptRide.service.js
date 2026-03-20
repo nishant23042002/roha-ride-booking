@@ -89,7 +89,7 @@ export async function acceptRideService({ rideId, driverId }) {
         "Ride already taken by another driver",
         { driverId },
       );
-      throw new Error("Ride already accepted");
+      throw new Error("Ride expired / cancelled ❗");
     }
 
     // -----------------------------

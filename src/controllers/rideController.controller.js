@@ -53,10 +53,6 @@ export const requestRide = async (req, res) => {
       `🚘 VEHICLE=${vehicleType} | PASSENGERS=${passengerCount} | TYPE=${rideType}`,
     );
 
-    console.log(
-      `📍 PICKUP=(${pickupLatitude}, ${pickupLongitude}) → DROP=(${dropLatitude}, ${dropLongitude})`,
-    );
-
     // 2️⃣ Validate customer
     const customer = await User.findById(customerId);
     if (!customer) {
@@ -136,29 +132,6 @@ export const requestRide = async (req, res) => {
     const HEARTBEAT_LIMIT = 30000;
     banner("SEARCHING NEARBY DRIVERS");
 
-    // const drivers = await Driver.find({
-    //   vehicleType,
-
-    //   // ✅ new state machine condition
-    //   driverState: "searching",
-
-    //   vehicleCapacity: { $gte: passengerCount },
-
-    //   lastHeartbeat: {
-    //     $gte: new Date(Date.now() - HEARTBEAT_LIMIT),
-    //   },
-
-    //   currentLocation: {
-    //     $near: {
-    //       $geometry: {
-    //         type: "Point",
-    //         coordinates: [pickupLongitude, pickupLatitude],
-    //       },
-    //       $maxDistance: 5000,
-    //     },
-    //   },
-    // }).limit(5);
-
     const { drivers: rankedDrivers, radius } = await findBestDrivers({
       pickupLat: pickupLatitude,
       pickupLng: pickupLongitude,
@@ -197,24 +170,6 @@ export const requestRide = async (req, res) => {
 
     banner("DISPATCHING RIDE");
 
-    // 7️⃣ Dispatch ride to multiple drivers
-    // for (const driver of rankedDrivers) {
-    //   rideLog(ride._id, "DISPATCH_DRIVER", "Ride request sent to driver", {
-    //     driverId: driver._id,
-    //   });
-
-    //   await changeDriverState({
-    //     driverId: driver._id,
-    //     newState: "requested",
-    //     rideId: ride._id,
-    //   });
-    //   const socketId = onlineDrivers.get(driver._id.toString());
-
-    //   if (socketId) {
-    //     io.to(socketId).emit("new-ride", ride);
-    //   }
-    // }
-
     const TOP_DRIVERS = 5;
 
     const driversToDispatch = rankedDrivers
@@ -233,25 +188,27 @@ export const requestRide = async (req, res) => {
       }
     }
 
+    const DISPATCH_TIMEOUT = 15000;
+
     setTimeout(async () => {
-      const freshRide = await Ride.findById(ride._id);
+      try {
+        const freshRide = await Ride.findById(ride._id);
 
-      // if still not accepted → retry or cancel
-      if (freshRide && freshRide.status === "requested") {
-        console.log("⏳ DISPATCH TIMEOUT → retrying or cancelling");
+        if (freshRide && freshRide.status === "requested") {
+          console.log("⏳ DISPATCH TIMEOUT → cancelling ride");
 
-        // OPTION 1: retry dispatch
-        // OPTION 2: mark failed
+          freshRide.status = "cancelled";
+          freshRide.cancelledBy = "system";
+          freshRide.cancelReason = "No drivers accepted";
 
-        freshRide.status = "cancelled";
-        freshRide.cancelledBy = "system";
-        freshRide.cancelReason = "No drivers accepted";
+          await freshRide.save();
 
-        await freshRide.save();
-
-        rideLog(ride._id, "DISPATCH_TIMEOUT", "No driver accepted ride");
+          rideLog(ride._id, "DISPATCH_TIMEOUT", "No driver accepted ride");
+        }
+      } catch (err) {
+        console.log("❌ DISPATCH TIMEOUT ERROR:", err.message);
       }
-    }, 10000); // 10sec
+    }, DISPATCH_TIMEOUT);
 
     res.status(201).json({
       message: "Ride requested successfully",

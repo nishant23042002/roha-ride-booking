@@ -2,6 +2,11 @@ import mongoose from "mongoose";
 
 const driverSchema = new mongoose.Schema(
   {
+    isOnline: {
+      type: Boolean,
+      default: false,
+    },
+
     user: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -94,7 +99,7 @@ const driverSchema = new mongoose.Schema(
       },
       coordinates: {
         type: [Number], // [longitude, latitude]
-        default: [0, 0],
+        default: undefined,
       },
     },
 
@@ -109,8 +114,14 @@ const driverSchema = new mongoose.Schema(
   },
 );
 
-driverSchema.index({ currentLocation: "2dsphere" });
+driverSchema.index({
+  vehicleType: 1,
+  driverState: 1,
+  lastHeartbeat: 1,
+  currentLocation: "2dsphere",
+});
 
+driverSchema.index({ lastHeartbeat: 1 });
 const Driver = mongoose.model("Driver", driverSchema);
 
 export default Driver;

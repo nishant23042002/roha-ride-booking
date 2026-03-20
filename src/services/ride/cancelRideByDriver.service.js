@@ -1,5 +1,3 @@
-// /src/services/ride/cancelRideByDriverService.js
-
 import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
@@ -12,18 +10,40 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
   try {
     session.startTransaction();
 
-    const ride = await Ride.findOne({
-      _id: rideId,
-      driver: driverId,
-    }).session(session);
-
+    const ride = await Ride.findById(rideId).session(session);
     if (!ride) throw new Error("Ride not found");
 
-    // ✅ IDEMPOTENT
-    if (ride.status === "cancelled") {
+    // ✅ idempotent
+    if (ride.status === "cancelled") return ride;
+
+    const driver = await Driver.findById(driverId).session(session);
+    if (!driver) throw new Error("Driver not found");
+
+    // =============================
+    // 🔥 CASE 1: REQUESTED → SOFT CANCEL (REJECT)
+    // =============================
+    if (ride.status === "requested") {
+      ride.driver = null;
+
+      // optional tracking
+      ride.rejectedDrivers = [...(ride.rejectedDrivers || []), driverId];
+
+      await ride.save({ session });
+
+      await changeDriverState({
+        driverId,
+        newState: "searching",
+        session,
+      });
+
+      await session.commitTransaction();
+
       return ride;
     }
 
+    // =============================
+    // 🔥 CASE 2: REAL CANCEL
+    // =============================
     if (!["accepted", "arrived"].includes(ride.status)) {
       throw new Error("Cannot cancel this ride");
     }
@@ -34,9 +54,6 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
 
     await ride.save({ session });
 
-    const driver = await Driver.findById(driverId).session(session);
-    if (!driver) throw new Error("Driver not found");
-
     banner("RIDE CANCELLED");
 
     rideLog(ride._id, "DRIVER_CANCELLED", "Cancelled by driver", {
@@ -44,6 +61,7 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
       reason: ride.cancelReason,
     });
 
+    // seat fix
     if (driver.vehicleType === "minidoor") {
       driver.currentSeatLoad -= ride.passengerCount;
       if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;

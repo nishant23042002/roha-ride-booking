@@ -134,6 +134,11 @@ const rideSchema = new mongoose.Schema(
       default: 0,
     },
 
+    vehicleType: {
+      type: String,
+      default: "auto",
+    },
+
     paymentMethod: {
       type: String,
       enum: ["cash", "online"],

@@ -31,7 +31,7 @@ export default function registerRideHandlers(socket) {
   // ACCEPT RIDE
   // =============================
   socket.on("accept-ride", (data) => {
-    if (!rateLimit(`accept-${socket.data.userId}`, 5, 3000)) return;
+    if (!rateLimit(`accept-${socket.data.userId}`, 5, 15000)) return;
     acceptRideHandler(socket, data);
   });
 

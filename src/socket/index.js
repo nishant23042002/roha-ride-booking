@@ -4,6 +4,7 @@ import { Server } from "socket.io";
 import registerDriverHandlers from "./driver.socket.js";
 import registerRideHandlers from "./ride.socket.js";
 import Driver from "../models/Driver.js";
+import { removeDriver } from "../modules/geo/geo.redis.js";
 
 let io;
 export const onlineDrivers = new Map(); // driverId -> socketId
@@ -47,22 +48,6 @@ export const getIO = () => {
   return io;
 };
 
-// function handleDisconnect(socket) {
-//   for (const [driverId, sockId] of onlineDrivers.entries()) {
-//     if (sockId === socket.id) {
-//       onlineDrivers.delete(driverId);
-//       console.log("Driver disconnected:", driverId);
-//     }
-//   }
-
-//   for (const [customerId, sockId] of onlineCustomers.entries()) {
-//     if (sockId === socket.id) {
-//       onlineCustomers.delete(customerId);
-//       console.log("Customer disconnected:", customerId);
-//     }
-//   }
-// }
-
 function handleDisconnect(socket) {
   const { userId, role } = socket.data;
 
@@ -82,6 +67,7 @@ function handleDisconnect(socket) {
         driverState: "offline",
       });
 
+      await removeDriver(userId).catch(() => {});
       console.log("❌ Driver offline:", userId);
     }
 

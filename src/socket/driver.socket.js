@@ -7,25 +7,58 @@ import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
 import { disconnectTimers } from "./index.js";
 import { throttledLog } from "../core/logger/logger.js";
 import { rateLimit } from "../core/rateLimiter.js";
+import {
+  updateDriverLocation,
+  removeDriver,
+} from "../modules/geo/geo.redis.js";
 
+const GPS_CONFIG = {
+  searching: {
+    minDistanceKm: 0.03, // 30m
+    minTimeMs: 5000,
+  },
+  to_pickup: {
+    minDistanceKm: 0.02,
+    minTimeMs: 3000,
+  },
+  on_trip: {
+    minDistanceKm: 0.05,
+    minTimeMs: 7000,
+  },
+};
+const DB_UPDATE_INTERVAL = 10000; // 10 sec
+
+// =============================
+// 🧠 MEMORY STORES
+// =============================
 const activeDrivers = new Map();
 const driverLastLocations = new Map();
+const driverLastDBUpdate = new Map();
+const driverStateCache = new Map();
 
-// Broadcast drivers to map (throttled)
+// =============================
+// 📡 BROADCAST TO MAP (THROTTLED)
+// =============================
 setInterval(() => {
   const io = getIO();
-  if(!io) return;
+  if (!io) return;
 
-  const drivers = Array.from(activeDrivers.values());
+  const drivers = Array.from(activeDrivers.values()).slice(0, 50);
   if (!drivers.length) return;
 
   io.to("rider-map-room").emit("nearbyDrivers", drivers);
 }, 1500);
 
+// =============================
+// 🚀 MAIN HANDLER
+// =============================
 export default function registerDriverHandlers(socket) {
+  // =============================
+  // 🟢 REGISTER
+  // =============================
   socket.on("register-driver", async (driverId) => {
     const io = getIO();
-    if(!io) return
+    if (!io) return;
 
     // 🔥 Kill old socket
     if (onlineDrivers.has(driverId)) {
@@ -55,12 +88,14 @@ export default function registerDriverHandlers(socket) {
 
     // 🔥 Fetch driver
     const driver = await Driver.findById(driverId);
-
     if (!driver) return;
 
-    // ==================================================
-    // 🚨 CRITICAL FIX — VALIDATE currentRide
-    // ==================================================
+    // Cache driver state
+    driverStateCache.set(driverId, driver.driverState);
+
+    // =============================
+    // 🧹 CLEAN STALE RIDE
+    // =============================
     if (driver.currentRide) {
       const ride = await Ride.findById(driver.currentRide);
 
@@ -92,6 +127,9 @@ export default function registerDriverHandlers(socket) {
     });
   });
 
+  // =============================
+  // 💓 HEARTBEAT
+  // =============================
   socket.on("driver-heartbeat", async (driverId) => {
     if (!rateLimit(`hb-${driverId}`, 5, 5000)) return;
 
@@ -102,43 +140,87 @@ export default function registerDriverHandlers(socket) {
     throttledLog(`heartbeat-${driverId}`, 5000, `💓 HEARTBEAT → ${driverId}`);
   });
 
+  // =============================
+  // 📍 LOCATION UPDATE (OPTIMIZED)
+  // =============================
   socket.on("driver-location-update", async ({ driverId, lat, lng }) => {
     try {
       if (!rateLimit(`gps-${driverId}`, 20, 5000)) return;
       if (!driverId || lat == null || lng == null) return;
 
       const last = driverLastLocations.get(driverId);
+      const now = Date.now();
 
-      // Prevent unrealistic GPS jumps
+      // =============================
+      // 🚫 GPS VALIDATION
+      // =============================
       if (last) {
         const distance = haversineDistance(last.lat, last.lng, lat, lng);
+        const timeDiff = (now - last.timestamp) / 1000;
 
-        const timeDiff = (Date.now() - last.timestamp) / 1000;
+        if (timeDiff > 0) {
+          const speed = distance / (timeDiff / 3600);
 
-        const speed = distance / (timeDiff / 3600); // km/h
+          if (speed > 120) {
+            console.log("❌ GPS spoof detected:", driverId);
+            return;
+          }
+        }
+      }
+      const smoothed = smoothLocation(last, { lat, lng });
+      throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE");
 
-        if (speed > 200 || distance > 1) {
-          throttledLog(
-            `gps-reject-${driverId}`,
-            5000,
-            `❌ GPS_REJECTED → ${driverId}`,
-          );
-          return;
+      // =============================
+      // 🧠 REDIS UPDATE DECISION
+      // =============================
+      // ⚠️ DB READ (temporary)
+      const driverState = driverStateCache.get(driverId) || "searching";
+
+      const config = GPS_CONFIG[driverState];
+
+      let shouldUpdateRedis = false;
+
+      if (!last) {
+        shouldUpdateRedis = true;
+      } else {
+        const distance = haversineDistance(
+          last.lat,
+          last.lng,
+          smoothed.lat,
+          smoothed.lng,
+        );
+
+        const timeDiff = now - last.timestamp;
+
+        if (distance > config.minDistanceKm || timeDiff > config.minTimeMs) {
+          shouldUpdateRedis = true;
         }
       }
 
-      const smoothed = smoothLocation(last, { lat, lng });
+      // =============================
+      // 📍 UPDATE REDIS (SMART)
+      // =============================
+      if (shouldUpdateRedis) {
+        try {
+          await updateDriverLocation(driverId, smoothed.lat, smoothed.lng);
+          console.log("📍 GEO Updated:", driverId);
+        } catch (err) {
+          console.log("❌ Redis GEO error:", err.message);
+        }
+      }
 
-      const now = Date.now();
-
-      throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE");
-
+      // =============================
+      // 🧠 UPDATE LOCAL CACHE (AFTER)
+      // =============================
       driverLastLocations.set(driverId, {
         lat: smoothed.lat,
         lng: smoothed.lng,
-        timestamp: now,
+        timestamp: Date.now(),
       });
 
+      // =============================
+      // 🧭 HEADING CALCULATION
+      // =============================
       let heading = 0;
 
       if (last) {
@@ -149,50 +231,47 @@ export default function registerDriverHandlers(socket) {
         heading = (heading + 360) % 360;
       }
 
+      // =============================
+      // 📡 MAP DATA
+      // =============================
       activeDrivers.set(driverId, {
         id: driverId,
         latitude: smoothed.lat,
         longitude: smoothed.lng,
         heading,
       });
-      let driver = null;
 
-      try {
-        driver = await Driver.findByIdAndUpdate(
-          driverId,
-          {
-            currentLocation: {
-              type: "Point",
-              coordinates: [smoothed.lng, smoothed.lat],
-            },
-            lastHeartbeat: new Date(),
+      // =============================
+      // 💾 DB UPDATE
+      // =============================
+      const lastDbUpdate = driverLastDBUpdate.get(driverId);
+
+      if (!lastDbUpdate || Date.now() - lastDbUpdate > DB_UPDATE_INTERVAL) {
+        await Driver.findByIdAndUpdate(driverId, {
+          currentLocation: {
+            type: "Point",
+            coordinates: [smoothed.lng, smoothed.lat],
           },
-          { returnDocument: "after" },
-        );
-      } catch (err) {
-        console.log("❌ DB UPDATE FAILED:", err.message);
-        return; // 🚨 STOP further execution
+          lastHeartbeat: new Date(),
+        });
+
+        driverLastDBUpdate.set(driverId, Date.now());
       }
 
-      if (!driver) return;
+      // =============================
+      // 🚗 LIVE TRACKING (ON TRIP)
+      // =============================
+      const currentRide = activeDrivers.get(driverId)?.rideId;
 
-      // If driver has ride → stream location to passenger
-      if (driver.currentRide) {
+      if (currentRide) {
         const io = getIO();
-        if(!io) return;
-        const ride = await Ride.findById(driver.currentRide);
-
-        if (!ride) return;
-
-        // const customerSocketId = onlineCustomers.get(ride.customer.toString());
-        const room = `ride:${driver.currentRide}`;
-
-        io.to(room).emit("driver-location-update", {
-          driverId,
-          lat: smoothed.lat,
-          lng: smoothed.lng,
-          timestamp: Date.now(),
-        });
+        if (io) {
+          io.to(`ride:${currentRide}`).emit("driver-location-update", {
+            driverId,
+            lat: smoothed.lat,
+            lng: smoothed.lng,
+          });
+        }
       }
     } catch (err) {
       console.log("\n❌ DRIVER LOCATION ERROR");
@@ -200,6 +279,9 @@ export default function registerDriverHandlers(socket) {
     }
   });
 
+  // =============================
+  // 🟢 ONLINE
+  // =============================
   socket.on("driver-go-online", async (driverId) => {
     try {
       await Driver.findByIdAndUpdate(driverId, {
@@ -208,8 +290,7 @@ export default function registerDriverHandlers(socket) {
         lastHeartbeat: new Date(),
       });
 
-      activeDrivers.delete(driverId);
-      driverLastLocations.delete(driverId);
+      driverStateCache.set(driverId, "searching");
 
       console.log("🟢 DRIVER ONLINE:", driverId);
     } catch (err) {
@@ -217,6 +298,9 @@ export default function registerDriverHandlers(socket) {
     }
   });
 
+  // =============================
+  // 🔴 OFFLINE
+  // =============================
   socket.on("driver-go-offline", async (driverId) => {
     try {
       await Driver.findByIdAndUpdate(driverId, {
@@ -227,8 +311,10 @@ export default function registerDriverHandlers(socket) {
 
       activeDrivers.delete(driverId);
       driverLastLocations.delete(driverId);
+      driverStateCache.delete(driverId);
 
       onlineDrivers.delete(driverId);
+      await removeDriver(driverId);
 
       console.log("🔴 DRIVER OFFLINE:", driverId);
     } catch (err) {
@@ -236,7 +322,10 @@ export default function registerDriverHandlers(socket) {
     }
   });
 
-  socket.on("join-map-room", (data) => {
+  // =============================
+  // 🗺️ MAP ROOM
+  // =============================
+  socket.on("join-map-room", () => {
     throttledLog(`map-room-${socket.id}`, 5000, "MAP_ROOM_JOIN");
     socket.join("rider-map-room");
   });

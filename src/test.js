@@ -237,7 +237,7 @@ function startGPS(route, target = null, onArrive = null) {
       progress = 0;
       segmentIndex++;
     }
-  }, 1000);
+  }, 3000);
 }
 
 const BASE_LOCATION = idleRoute[0];

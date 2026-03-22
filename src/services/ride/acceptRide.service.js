@@ -92,34 +92,6 @@ export async function acceptRideService({ rideId, driverId }) {
       throw new Error("Ride expired / cancelled ❗");
     }
 
-    // -----------------------------
-    // Seat Allocation (shared vehicle)
-    // -----------------------------
-
-    if (driver.vehicleType === "minidoor") {
-      const updatedDriver = await Driver.findOneAndUpdate(
-        {
-          _id: driverId,
-          currentSeatLoad: {
-            $lte: driver.vehicleCapacity - ride.passengerCount,
-          },
-        },
-        {
-          $inc: { currentSeatLoad: ride.passengerCount },
-        },
-        { returnDocument: "after", session },
-      );
-
-      if (!updatedDriver) {
-        throw new Error("Not enough seats available");
-      }
-
-      rideLog(rideId, "SEAT_ALLOCATED", "Seat allocated for shared vehicle", {
-        passengerCount: ride.passengerCount,
-        newSeatLoad: updatedDriver.currentSeatLoad,
-      });
-    }
-
     banner("RIDE CLAIMED");
 
     rideLog(rideId, "ACCEPT_SUCCESS", "Driver successfully claimed ride", {

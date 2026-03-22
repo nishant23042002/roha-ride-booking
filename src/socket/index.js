@@ -18,7 +18,7 @@ export const initSocket = (server) => {
       methods: ["GET", "POST"],
     },
   });
-
+ 
   io.on("connection", (socket) => {
     console.log("\n🟢 SOCKET CONNECTED:", socket.id);
 

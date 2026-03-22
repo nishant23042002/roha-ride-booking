@@ -1,7 +1,7 @@
 import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
-import { changeDriverState } from "../driverState.service.js";
+import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 
 export async function cancelRideByDriverService({ rideId, driverId, reason }) {
@@ -42,10 +42,29 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
     }
 
     // =============================
-    // 🔥 CASE 2: REAL CANCEL
+    // 🔥 STRICT CANCEL RULES
     // =============================
-    if (!["accepted", "arrived"].includes(ride.status)) {
-      throw new Error("Cannot cancel this ride");
+
+    if (ride.status === "requested") {
+      // soft reject
+      ride.driver = null;
+
+      ride.rejectedDrivers = [...(ride.rejectedDrivers || []), driverId];
+
+      await ride.save({ session });
+
+      await changeDriverState({
+        driverId,
+        newState: "searching",
+        session,
+      });
+
+      await session.commitTransaction();
+      return ride;
+    }
+
+    if (ride.status === "accepted") {
+      throw new Error("❌ Cannot cancel after accepting ride");
     }
 
     ride.status = "cancelled";
@@ -60,12 +79,6 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
       driverId,
       reason: ride.cancelReason,
     });
-
-    // seat fix
-    if (driver.vehicleType === "minidoor") {
-      driver.currentSeatLoad -= ride.passengerCount;
-      if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;
-    }
 
     driver.currentRide = null;
 

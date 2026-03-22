@@ -3,10 +3,10 @@
 import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
-import { calculateFare } from "../pricing/priceEngine.js";
+import { calculateAutoFare } from "../../pricing/engine/priceEngine.js";
 import { driverTiers } from "../../config/driverTier.js";
-import { creditDriverWallet } from "../walletService.js";
-import { changeDriverState } from "../driverState.service.js";
+import { creditDriverWallet } from "../driver/walletService.js";
+import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 
 export async function completeRideService({ rideId, driverId }) {
@@ -37,7 +37,7 @@ export async function completeRideService({ rideId, driverId }) {
     // -----------------------------
     // 3️⃣ Calculate Fare
     // -----------------------------
-    const fareResult = calculateFare({
+    const fareResult = calculateAutoFare({
       vehicleType: driver.vehicleType,
       pickupLat: ride.pickupLocation.coordinates[1],
       pickupLon: ride.pickupLocation.coordinates[0],

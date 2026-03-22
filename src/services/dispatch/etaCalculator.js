@@ -4,9 +4,6 @@ import { haversineDistance } from "../../utils/gpsUtils.js";
 
 const AVG_SPEED = {
   auto: 25,
-  bike: 35,
-  cab: 30,
-  minidoor: 20,
 };
 
 export function calculateDriverETA(driver, pickupLat, pickupLng) {
@@ -14,9 +11,11 @@ export function calculateDriverETA(driver, pickupLat, pickupLng) {
 
   const distance = haversineDistance(lat, lng, pickupLat, pickupLng);
 
-  if (distance > 0.5) {
-    // >500m jump
-    return; // reject
+  if (distance > 5) {
+    console.log(
+      `❌ Driver filtered (too far) → ${driver._id} | distance=${distance.toFixed(2)}km`,
+    );
+    return null;
   }
 
   const speed = AVG_SPEED[driver.vehicleType] || 25;

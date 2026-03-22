@@ -144,6 +144,11 @@ const rideSchema = new mongoose.Schema(
       enum: ["cash", "online"],
       default: "cash",
     },
+
+    pricingSnapshot: {
+      type: Object,
+      default: {},
+    },
   },
   { timestamps: true, optimisticConcurrency: true },
 );

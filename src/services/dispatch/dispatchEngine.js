@@ -19,33 +19,40 @@ export async function findBestDrivers({
     heartbeatLimit,
   });
 
-  console.log("🚀 findBestDrivers CALLED");
+  console.log("\n🔍 FIND BEST DRIVERS START");
+  console.log("Pickup:", pickupLat, pickupLng);
+  console.log("Vehicle:", vehicleType);
 
-  console.log("INPUT:", {
-    pickupLat,
-    pickupLng,
-    vehicleType,
-    passengerCount,
-  });
   if (!drivers.length) {
     return { drivers: [], radius };
   }
 
-  const driversWithETA = drivers.map((driver) => {
-    const { etaMinutes, distanceKm } = calculateDriverETA(
-      driver,
-      pickupLat,
-      pickupLng,
-    );
+  const driversWithETA = drivers
+    .map((driver) => {
+      const result = calculateDriverETA(driver, pickupLat, pickupLng);
+      if (!result) return null;
 
-    return {
-      driver,
-      etaMinutes,
-      distanceKm,
-    };
-  });
+      return {
+        driver,
+        ...result,
+      };
+    })
+    .filter(Boolean);
+
+  // 🔥 ADD THIS
+  if (!driversWithETA.length) {
+    console.log("❌ All drivers filtered out after ETA calculation");
+    return { drivers: [], radius };
+  }
 
   const ranked = rankDrivers(driversWithETA);
+
+  console.log("🏁 Ranked Drivers:");
+  ranked.forEach((d, i) => {
+    console.log(
+      `#${i + 1} Driver=${d.driver._id} ETA=${d.etaMinutes} Score=${d.score}`,
+    );
+  });
 
   return {
     drivers: ranked,

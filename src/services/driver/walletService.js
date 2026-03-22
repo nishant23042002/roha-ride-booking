@@ -1,7 +1,7 @@
 // /src/services/creditDriverWallet.js
 
-import DriverWallet from "../models/DriverWallet.js";
-import DriverWalletLedger from "../models/DriverWalletLedger.js";
+import DriverWallet from "../../models/DriverWallet.js"
+import DriverWalletLedger from "../../models/DriverWalletLedger.js"
 
 export async function creditDriverWallet({
   driverId,

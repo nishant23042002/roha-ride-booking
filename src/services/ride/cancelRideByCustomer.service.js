@@ -1,7 +1,7 @@
 import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
-import { changeDriverState } from "../driverState.service.js";
+import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 
 export async function cancelRideByCustomerService({ rideId, reason }) {
@@ -36,11 +36,6 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
       const driver = await Driver.findById(ride.driver).session(session);
 
       if (driver) {
-        if (driver.vehicleType === "minidoor") {
-          driver.currentSeatLoad -= ride.passengerCount;
-          if (driver.currentSeatLoad < 0) driver.currentSeatLoad = 0;
-        }
-
         driver.currentRide = null;
 
         await changeDriverState({

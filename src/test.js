@@ -98,14 +98,17 @@ rl.on("line", (input) => {
       break;
 
     case "3":
-      if (!currentRide) return console.log("❌ No ride");
+      if (state === "REQUESTED") {
+        console.log("🚫 Rejecting ride request");
 
-      socket.emit("cancel-ride-by-driver", {
-        rideId: currentRide._id,
-        driverId: DRIVER_ID,
-        reason: "Driver rejected before accepting",
-      });
-
+        socket.emit("cancel-ride-by-driver", {
+          rideId: currentRide._id,
+          driverId: DRIVER_ID,
+          reason: "Rejected before accept",
+        });
+      } else {
+        console.log("❌ Cannot cancel after accepting ride");
+      }
       break;
 
     case "4":

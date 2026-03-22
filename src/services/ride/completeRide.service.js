@@ -9,6 +9,7 @@ import { creditDriverWallet } from "../driver/walletService.js";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 import { clearDispatch } from "../../modules/dispatch/dispatch.redis.js";
+import { setDriverState } from "../../modules/driverState/driverState.redis.js";
 
 export async function completeRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -32,7 +33,7 @@ export async function completeRideService({ rideId, driverId }) {
     // -----------------------------
     // 2️⃣ Validate Driver
     // -----------------------------
-    const driver = await Driver.findById(driverId).session(session);
+    const driver = await Driver.findById(driverId);
     if (!driver) throw new Error("Driver missing");
 
     // -----------------------------
@@ -115,13 +116,23 @@ export async function completeRideService({ rideId, driverId }) {
     ride.driverEarning = Number(driverEarning.toFixed(2));
 
     await ride.save({ session });
+    await session.commitTransaction();
 
-    // -----------------------------
-    // 6️⃣ Driver Stats
-    // -----------------------------
-    driver.totalTrips += 1;
-    driver.totalEarnings += ride.driverEarning;
-    driver.totalDistanceKm += ride.rideDistanceKm;
+    // 🔥 SAFE UPDATE OUTSIDE TRANSACTION
+    await Driver.findByIdAndUpdate(driverId, {
+      $inc: {
+        totalTrips: 1,
+        totalEarnings: ride.driverEarning,
+        totalDistanceKm: ride.rideDistanceKm,
+      },
+      $set: {
+        currentRide: null,
+        driverState: "searching",
+        isOnline: true,
+      },
+    });
+
+    await setDriverState(driverId, "searching");
 
     // -----------------------------
     // 7️⃣ Wallet Credit
@@ -131,27 +142,10 @@ export async function completeRideService({ rideId, driverId }) {
       amount: ride.driverEarning,
       reason: "ride_earning",
       rideId: ride._id,
-      session,
     });
 
-    // -----------------------------
-    // 8️⃣ Reset Driver
-    // -----------------------------
-    driver.currentRide = null;
-    driver.driverState = "searching";
-    driver.isOnline = true; // ensure available
-
-    await changeDriverState({
-      driverId,
-      newState: "searching",
-      session,
-    });
-
-    await driver.save({ session });
-
-    
-    await session.commitTransaction();
     await clearDispatch(rideId.toString()).catch(() => {});
+
     banner("RIDE COMPLETED");
 
     rideLog(ride._id, "TRIP_FINISHED", "Ride completed successfully", {

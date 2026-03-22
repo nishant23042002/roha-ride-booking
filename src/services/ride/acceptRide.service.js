@@ -6,10 +6,12 @@ import mongoose from "mongoose";
 import { rideLog } from "../../utils/rideLogger.js";
 import { banner } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
+import { setAccepted } from "../../modules/dispatch/dispatch.redis.js";
 import {
-  setAccepted,
-  clearDispatch,
-} from "../../modules/dispatch/dispatch.redis.js";
+  getDriverState,
+  setDriverState,
+} from "../../modules/driverState/driverState.redis.js";
+import { changeDriverState } from "../driver/driverState.service.js";
 
 export async function acceptRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -41,6 +43,11 @@ export async function acceptRideService({ rideId, driverId }) {
       throw new Error("Driver connection unstable");
     }
 
+    const state = await getDriverState(driverId);
+
+    if (state !== null && state !== "searching") {
+      throw new Error("Driver not available (Redis)");
+    }
     // -----------------------------
     // 1️⃣ LOCK DRIVER FIRST 🔥
     // -----------------------------
@@ -102,6 +109,8 @@ export async function acceptRideService({ rideId, driverId }) {
     // =====================================================
     await session.commitTransaction();
 
+    await setDriverState(driverId, "to_pickup");
+
     // =====================================================
     // 🔥 UPDATE REDIS AFTER COMMIT
     // =====================================================
@@ -119,11 +128,9 @@ export async function acceptRideService({ rideId, driverId }) {
     // =====================================================
     // 🔥 DRIVER ROLLBACK
     // =====================================================
-    await Driver.findByIdAndUpdate(driverId, {
-      $set: {
-        driverState: "searching",
-        currentRide: null,
-      },
+    await changeDriverState({
+      driverId,
+      newState: "searching",
     });
 
     throw error;

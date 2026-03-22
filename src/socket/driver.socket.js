@@ -11,6 +11,10 @@ import {
   updateDriverLocation,
   removeDriver,
 } from "../modules/geo/geo.redis.js";
+import {
+  removeDriverState,
+  setDriverState,
+} from "../modules/driverState/driverState.redis.js";
 
 const GPS_CONFIG = {
   searching: {
@@ -90,6 +94,8 @@ export default function registerDriverHandlers(socket) {
     const driver = await Driver.findById(driverId);
     if (!driver) return;
 
+    // ✅ ALWAYS SYNC REDIS STATE
+    await setDriverState(driverId, driver.driverState || "searching");
     // Cache driver state
     driverStateCache.set(driverId, driver.driverState);
 
@@ -99,11 +105,6 @@ export default function registerDriverHandlers(socket) {
     if (driver.currentRide) {
       const ride = await Ride.findById(driver.currentRide);
 
-      if (!ride) {
-        await updateDriverLocation(driverId, lat, lng);
-        return;
-      }
-
       if (!ride || ["completed", "cancelled"].includes(ride.status)) {
         // ❌ stale ride → CLEAN IT
         console.log("🧹 Cleaning stale currentRide:", driver.currentRide);
@@ -112,6 +113,9 @@ export default function registerDriverHandlers(socket) {
         driver.driverState = "searching";
 
         await driver.save();
+
+        await setDriverState(driverId, "searching");
+        driverStateCache.set(driverId, "searching");
       } else {
         // ✅ valid ride → RESUME
         console.log("🔁 Resuming ride:", ride._id);
@@ -178,15 +182,7 @@ export default function registerDriverHandlers(socket) {
       // =============================
       // 🧠 REDIS UPDATE DECISION
       // =============================
-      // ⚠️ DB READ (temporary)
-      let driverState = driverStateCache.get(driverId);
-
-      if (!driverState) {
-        const driver = await Driver.findById(driverId).select("driverState");
-        driverState = driver?.driverState || "searching";
-
-        driverStateCache.set(driverId, driverState);
-      }
+      let driverState = driverStateCache.get(driverId) || "searching";
 
       const config = GPS_CONFIG[driverState] || GPS_CONFIG.searching;
       let shouldUpdateRedis = false;
@@ -289,6 +285,7 @@ export default function registerDriverHandlers(socket) {
       });
 
       driverStateCache.set(driverId, "searching");
+      await setDriverState(driverId, "searching");
 
       console.log("🟢 DRIVER ONLINE:", driverId);
     } catch (err) {
@@ -310,9 +307,10 @@ export default function registerDriverHandlers(socket) {
       activeDrivers.delete(driverId);
       driverLastLocations.delete(driverId);
       driverStateCache.delete(driverId);
-      driverLastDBUpdate.delete(driverId)
+      driverLastDBUpdate.delete(driverId);
 
       onlineDrivers.delete(driverId);
+      await removeDriverState(driverId);
       await removeDriver(driverId);
 
       console.log("🔴 DRIVER OFFLINE:", driverId);

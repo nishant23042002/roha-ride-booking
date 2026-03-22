@@ -63,7 +63,6 @@ export async function arriveRideService({ rideId, driverId }) {
     await changeDriverState({
       driverId,
       newState: "arrived",
-      session,
     });
 
     await session.commitTransaction();

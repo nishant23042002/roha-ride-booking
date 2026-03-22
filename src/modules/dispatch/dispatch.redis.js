@@ -15,13 +15,8 @@ export async function initDispatch(rideId) {
     "INIT_DISPATCH",
   );
 
-  await safeRedis(() => redis.expire(key, 60), "SET_TTL");
-
   // ✅ Also prepare rejected key TTL (empty for now)
-  await safeRedis(
-    () => redis.expire(key + ":rejected", TTL_SECONDS),
-    "SET_TTL_REJECTED",
-  );
+  await safeRedis(() => redis.expire(key, TTL_SECONDS), "SET_TTL");
 
   console.log("🧠 Redis Dispatch INIT:", rideId);
 }
@@ -50,11 +45,11 @@ export async function setAccepted(rideId, driverId) {
 // ❌ ADD REJECTED
 // =============================
 export async function addRejected(rideId, driverId) {
-  const key = PREFIX + rideId;
+  const rejectedKey = PREFIX + rideId + ":rejected";
 
   await safeRedis(
     () =>
-      redis.hSet(key + ":rejected", {
+      redis.hSet(rejectedKey, {
         [driverId]: Date.now(),
       }),
     "ADD_REJECTED",
@@ -71,6 +66,7 @@ export async function addRejected(rideId, driverId) {
 // =============================
 export async function getDispatch(rideId) {
   const key = PREFIX + rideId;
+  const rejectedKey = key + ":rejected";
 
   const accepted = await safeRedis(
     () => redis.hGet(key, "acceptedDriver"),
@@ -78,7 +74,7 @@ export async function getDispatch(rideId) {
   );
 
   const rejected = await safeRedis(
-    () => redis.hGetAll(key + ":rejected"),
+    () => redis.hGetAll(rejectedKey),
     "GET_REJECTED",
   );
 
@@ -93,8 +89,9 @@ export async function getDispatch(rideId) {
 // =============================
 export async function clearDispatch(rideId) {
   const key = PREFIX + rideId;
+  const rejectedKey = key + ":rejected";
 
-  await safeRedis(() => redis.del(key, key + ":rejected"), "CLEAR_DISPATCH");
+  await safeRedis(() => redis.del(key, rejectedKey), "CLEAR_DISPATCH");
 
   console.log("🧹 Redis Dispatch Cleared:", rideId);
 }

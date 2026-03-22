@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
+import { setDriverState } from "../../modules/driverState/driverState.redis.js";
 
 export async function startRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -72,7 +73,6 @@ export async function startRideService({ rideId, driverId }) {
     await changeDriverState({
       driverId,
       newState: "on_trip",
-      session,
     });
 
     await session.commitTransaction();

@@ -14,16 +14,16 @@ import {
 
 const GPS_CONFIG = {
   searching: {
-    minDistanceKm: 0.03, // 30m
-    minTimeMs: 5000,
+    minDistanceKm: 0.05, // 30m
+    minTimeMs: 8000,
   },
   to_pickup: {
     minDistanceKm: 0.02,
     minTimeMs: 3000,
   },
   on_trip: {
-    minDistanceKm: 0.05,
-    minTimeMs: 7000,
+    minDistanceKm: 0.04,
+    minTimeMs: 5000,
   },
 };
 const DB_UPDATE_INTERVAL = 10000; // 10 sec
@@ -34,7 +34,7 @@ const DB_UPDATE_INTERVAL = 10000; // 10 sec
 const activeDrivers = new Map();
 const driverLastLocations = new Map();
 const driverLastDBUpdate = new Map();
-const driverStateCache = new Map();
+export const driverStateCache = new Map();
 
 // =============================
 // 📡 BROADCAST TO MAP (THROTTLED)
@@ -98,6 +98,11 @@ export default function registerDriverHandlers(socket) {
     // =============================
     if (driver.currentRide) {
       const ride = await Ride.findById(driver.currentRide);
+
+      if (!ride) {
+        await updateDriverLocation(driverId, lat, lng);
+        return;
+      }
 
       if (!ride || ["completed", "cancelled"].includes(ride.status)) {
         // ❌ stale ride → CLEAN IT
@@ -174,10 +179,16 @@ export default function registerDriverHandlers(socket) {
       // 🧠 REDIS UPDATE DECISION
       // =============================
       // ⚠️ DB READ (temporary)
-      const driverState = driverStateCache.get(driverId) || "searching";
+      let driverState = driverStateCache.get(driverId);
 
-      const config = GPS_CONFIG[driverState];
+      if (!driverState) {
+        const driver = await Driver.findById(driverId).select("driverState");
+        driverState = driver?.driverState || "searching";
 
+        driverStateCache.set(driverId, driverState);
+      }
+
+      const config = GPS_CONFIG[driverState] || GPS_CONFIG.searching;
       let shouldUpdateRedis = false;
 
       if (!last) {
@@ -192,7 +203,10 @@ export default function registerDriverHandlers(socket) {
 
         const timeDiff = now - last.timestamp;
 
-        if (distance > config.minDistanceKm || timeDiff > config.minTimeMs) {
+        if (
+          distance > config.minDistanceKm ||
+          (timeDiff > config.minTimeMs && distance > config.minDistanceKm * 0.5)
+        ) {
           shouldUpdateRedis = true;
         }
       }
@@ -201,12 +215,12 @@ export default function registerDriverHandlers(socket) {
       // 📍 UPDATE REDIS (SMART)
       // =============================
       if (shouldUpdateRedis) {
-        try {
-          await updateDriverLocation(driverId, smoothed.lat, smoothed.lng);
-          console.log("📍 GEO Updated:", driverId);
-        } catch (err) {
-          console.log("❌ Redis GEO error:", err.message);
-        }
+        updateDriverLocation(driverId, smoothed.lat, smoothed.lng).catch(
+          (err) => {
+            console.log("❌ GEO UPDATE FAIL:", err.message);
+          },
+        );
+        console.log("📍 GEO Updated:", driverId);
       }
 
       // =============================
@@ -253,25 +267,9 @@ export default function registerDriverHandlers(socket) {
             coordinates: [smoothed.lng, smoothed.lat],
           },
           lastHeartbeat: new Date(),
-        });
+        }).catch(() => {});
 
         driverLastDBUpdate.set(driverId, Date.now());
-      }
-
-      // =============================
-      // 🚗 LIVE TRACKING (ON TRIP)
-      // =============================
-      const currentRide = activeDrivers.get(driverId)?.rideId;
-
-      if (currentRide) {
-        const io = getIO();
-        if (io) {
-          io.to(`ride:${currentRide}`).emit("driver-location-update", {
-            driverId,
-            lat: smoothed.lat,
-            lng: smoothed.lng,
-          });
-        }
       }
     } catch (err) {
       console.log("\n❌ DRIVER LOCATION ERROR");
@@ -312,6 +310,7 @@ export default function registerDriverHandlers(socket) {
       activeDrivers.delete(driverId);
       driverLastLocations.delete(driverId);
       driverStateCache.delete(driverId);
+      driverLastDBUpdate.delete(driverId)
 
       onlineDrivers.delete(driverId);
       await removeDriver(driverId);

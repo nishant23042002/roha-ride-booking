@@ -3,6 +3,7 @@
 import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
 import { findNearbyDrivers } from "../../modules/geo/geo.redis.js";
+import { driverStateCache } from "../../socket/driver.socket.js";
 
 const SEARCH_RADII = [1, 2, 3, 5]; // km
 
@@ -38,20 +39,22 @@ export async function radiusDriverSearch({
 
     console.log("🧠 GEO IDS:", driverIds);
 
-    if (!driverIds.length) continue;
-
     // =============================
     // 3️⃣ CONVERT TO OBJECT IDS
     // =============================
-    const objectIds = driverIds.map((id) => new mongoose.Types.ObjectId(id));
+    const objectIds = driverIds
+      .filter((id) => mongoose.Types.ObjectId.isValid(id))
+      .map((id) => new mongoose.Types.ObjectId(id));
+
+    if (!objectIds.length) continue;
 
     // =============================
     // 4️⃣ FETCH FROM MONGO
     // =============================
     const drivers = await Driver.find({
       _id: { $in: objectIds },
-      vehicleType,
       driverState: "searching",
+      vehicleType,
       isOnline: true,
       vehicleCapacity: { $gte: passengerCount },
       lastHeartbeat: {
@@ -59,13 +62,20 @@ export async function radiusDriverSearch({
       },
     }).limit(20);
 
-    console.log(`📊 Drivers after filtering: ${drivers.length}`);
+    const filteredDrivers = drivers.filter((driver) => {
+      const state = driverStateCache.get(driver._id.toString());
 
-    if (drivers.length) {
+      // fallback to DB if cache missing
+      return state ? state === "searching" : true;
+    });
+
+    console.log(`📊 Drivers after filtering: ${filteredDrivers.length}`);
+
+    if (filteredDrivers.length) {
       console.log(`✅ Radius search stopped at ${radiusKm} km`);
 
       return {
-        drivers,
+        drivers: filteredDrivers,
         radius: radiusKm * 1000, // meters (keep compatibility)
       };
     }

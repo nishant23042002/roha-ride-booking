@@ -32,6 +32,7 @@ let heartbeatInterval = null;
 let gpsInterval = null;
 let state = "IDLE";
 let isOnline = false;
+let lastSent = 0;
 
 function showMenu() {
   console.log(`
@@ -212,12 +213,15 @@ function startGPS(route, target = null, onArrive = null) {
 
     currentLocation = { lat, lng };
 
-    socket.emit("driver-location-update", {
-      driverId: DRIVER_ID,
-      lat,
-      lng,
-      vehicleType: "auto",
-    });
+    if (Date.now() - lastSent > 3000) {
+      socket.emit("driver-location-update", {
+        driverId: DRIVER_ID,
+        lat,
+        lng,
+        vehicleType: "auto",
+      });
+      lastSent = Date.now();
+    }
 
     if (target) {
       const distance = haversineDistance(lat, lng, target.lat, target.lng);
@@ -237,7 +241,7 @@ function startGPS(route, target = null, onArrive = null) {
       progress = 0;
       segmentIndex++;
     }
-  }, 3000);
+  }, 1000);
 }
 
 const BASE_LOCATION = idleRoute[0];

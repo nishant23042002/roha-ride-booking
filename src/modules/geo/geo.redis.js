@@ -2,15 +2,28 @@ import redis from "../../config/redis.js";
 
 const GEO_KEY = "drivers:geo";
 
+export async function safeRedis(op, label = "Redis") {
+  try {
+    return await op();
+  } catch (err) {
+    console.log(`❌ ${label} Error:`, err.message);
+    return null;
+  }
+}
+
 // =============================
 // 📍 ADD / UPDATE DRIVER LOCATION
 // =============================
-export async function updateDriverLocation(driverId, lat, lon) {
-  await redis.geoAdd(GEO_KEY, {
-    longitude: lon,
-    latitude: lat,
-    member: driverId,
-  });
+export async function updateDriverLocation(driverId, lat, lng) {
+  await safeRedis(
+    () =>
+      redis.geoAdd("drivers:geo", {
+        longitude: lng,
+        latitude: lat,
+        member: driverId,
+      }),
+    "GEO_ADD",
+  );
 
   console.log("📍 GEO Updated:", driverId);
 }
@@ -19,34 +32,23 @@ export async function updateDriverLocation(driverId, lat, lon) {
 // 🔍 FIND NEARBY DRIVERS
 // =============================
 export async function findNearbyDrivers(lat, lng, radiusKm) {
-  try {
-    const result = await redis.geoSearch(
-      "drivers:geo",
-      {
-        longitude: lng,
-        latitude: lat,
-      },
-      {
-        radius: radiusKm,
-        unit: "km",
-      },
-      {
-        WITHDIST: true,
-        SORT: "ASC",
-        COUNT: 20,
-      },
-    );
+  const result = await safeRedis(
+    () =>
+      redis.geoSearch(
+        GEO_KEY,
+        { longitude: lng, latitude: lat },
+        { radius: radiusKm, unit: "km" },
+        { WITHDIST: true, SORT: "ASC", COUNT: 20 },
+      ),
+    "GEO_SEARCH",
+  );
 
-    return result; // array of driverIds
-  } catch (err) {
-    console.log("❌ GEO SEARCH ERROR:", err.message);
-    return [];
-  }
+  return result || [];
 }
 
 // =============================
 // ❌ REMOVE DRIVER
 // =============================
 export async function removeDriver(driverId) {
-  await redis.zRem(GEO_KEY, driverId);
+  await safeRedis(() => redis.zRem(GEO_KEY, driverId), "REMOVE_DRIVER");
 }

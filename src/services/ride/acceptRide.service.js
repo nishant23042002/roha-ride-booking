@@ -6,6 +6,7 @@ import mongoose from "mongoose";
 import { rideLog } from "../../utils/rideLogger.js";
 import { banner } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
+import { dispatchState } from "../../modules/dispatch/dispatch.store.js";
 
 export async function acceptRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -82,6 +83,7 @@ export async function acceptRideService({ rideId, driverId }) {
       },
     );
 
+    
     if (!ride) {
       rideLog(
         rideId,
@@ -91,7 +93,8 @@ export async function acceptRideService({ rideId, driverId }) {
       );
       throw new Error("Ride expired / cancelled ❗");
     }
-
+    
+    dispatchState.setAccepted(ride._id.toString(), driverId);
     banner("RIDE CLAIMED");
 
     rideLog(rideId, "ACCEPT_SUCCESS", "Driver successfully claimed ride", {

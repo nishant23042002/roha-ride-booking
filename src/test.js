@@ -106,8 +106,8 @@ rl.on("line", (input) => {
           driverId: DRIVER_ID,
           reason: "Rejected before accept",
         });
-      } else {
-        console.log("❌ Cannot cancel after accepting ride");
+
+        updateState("SEARCHING"); // 🔥 ADD THIS
       }
       break;
 

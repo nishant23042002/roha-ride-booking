@@ -3,6 +3,7 @@ import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
+import { dispatchState } from "../../modules/dispatch/dispatch.store.js";
 
 export async function cancelRideByDriverService({ rideId, driverId, reason }) {
   const session = await mongoose.startSession();
@@ -26,7 +27,9 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
       ride.driver = null;
 
       // optional tracking
-      ride.rejectedDrivers = [...(ride.rejectedDrivers || []), driverId];
+      const rejectedSet = new Set(ride.rejectedDrivers || []);
+      rejectedSet.add(driverId);
+      ride.rejectedDrivers = [...rejectedSet];
 
       await ride.save({ session });
 
@@ -37,29 +40,13 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
       });
 
       await session.commitTransaction();
+      dispatchState.addRejected(rideId.toString(), driverId);
 
-      return ride;
-    }
-
-    // =============================
-    // 🔥 STRICT CANCEL RULES
-    // =============================
-
-    if (ride.status === "requested") {
-      // soft reject
-      ride.driver = null;
-
-      ride.rejectedDrivers = [...(ride.rejectedDrivers || []), driverId];
-
-      await ride.save({ session });
-
-      await changeDriverState({
-        driverId,
-        newState: "searching",
-        session,
-      });
-
-      await session.commitTransaction();
+      const state = dispatchState.get(rideId.toString());
+      if (state) {
+        state.lastEventAt = Date.now();
+      }
+      console.log("🚫 Driver rejected (soft):", driverId);
       return ride;
     }
 
@@ -72,6 +59,7 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
     ride.cancelReason = reason || "Driver cancelled";
 
     await ride.save({ session });
+    console.log("❌ Driver cancelled ride:", driverId);
 
     banner("RIDE CANCELLED");
 
@@ -92,6 +80,7 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
 
     await session.commitTransaction();
 
+    dispatchState.clear(rideId.toString());
     return ride;
   } catch (err) {
     await session.abortTransaction();

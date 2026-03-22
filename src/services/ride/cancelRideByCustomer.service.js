@@ -3,6 +3,7 @@ import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
+import { dispatchState } from "../../modules/dispatch/dispatch.store.js";
 
 export async function cancelRideByCustomerService({ rideId, reason }) {
   const session = await mongoose.startSession();
@@ -50,6 +51,7 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
 
     await session.commitTransaction();
 
+    dispatchState.clear(rideId.toString());
     return ride;
   } catch (err) {
     await session.abortTransaction();

@@ -8,7 +8,7 @@ import { driverTiers } from "../../config/driverTier.js";
 import { creditDriverWallet } from "../driver/walletService.js";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
-import { dispatchState } from "../../modules/dispatch/dispatch.store.js";
+import { clearDispatch } from "../../modules/dispatch/dispatch.redis.js";
 
 export async function completeRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -149,9 +149,9 @@ export async function completeRideService({ rideId, driverId }) {
 
     await driver.save({ session });
 
-    dispatchState.clear(rideId.toString());
+    
     await session.commitTransaction();
-
+    await clearDispatch(rideId.toString()).catch(() => {});
     banner("RIDE COMPLETED");
 
     rideLog(ride._id, "TRIP_FINISHED", "Ride completed successfully", {

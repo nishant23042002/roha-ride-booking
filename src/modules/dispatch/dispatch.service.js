@@ -3,7 +3,7 @@
 import Ride from "../../models/Ride.js";
 import { findBestDrivers } from "../../services/dispatch/dispatchEngine.js";
 import { getIO, onlineDrivers } from "../../socket/index.js";
-import { dispatchState } from "./dispatch.store.js";
+import { getDispatch, initDispatch } from "./dispatch.redis.js";
 
 // 🧠 Config
 const BATCHES = [3, 5, 8];
@@ -19,13 +19,11 @@ export async function startDispatch(rideId) {
   console.log("==============================\n");
   const rideKey = rideId.toString();
 
-  dispatchState.init(rideKey);
+  await initDispatch(rideKey);
 
   const context = {
     attempt: 0,
-    notifiedDrivers: new Set(),
     lastNotifiedAt: new Map(),
-    lastEventAt: Date.now(), // 🔥 ADD THIS
   };
 
   await runDispatch(rideId, context);
@@ -76,6 +74,10 @@ async function runDispatch(rideId, context) {
     console.log("📊 Total drivers found:", drivers.length);
 
     const io = getIO();
+    if (!io) {
+      console.log("⚠️ IO not ready → retrying...");
+      return setTimeout(() => runDispatch(rideId, context), 2000);
+    }
 
     let sent = 0;
 
@@ -85,9 +87,9 @@ async function runDispatch(rideId, context) {
     // 📡 DISPATCH TO DRIVERS
     // =====================================================
     const rideKey = rideId.toString();
-    const state = dispatchState.get(rideKey);
+    const state = await getDispatch(rideKey);
 
-    if (state?.acceptedDriver) {
+    if (state.acceptedDriver) {
       console.log(
         "🛑 Dispatch stopped → driver accepted:",
         state.acceptedDriver,
@@ -95,13 +97,16 @@ async function runDispatch(rideId, context) {
       return;
     }
 
+    // =====================================================
+    // 📡 DISPATCH LOOP
+    // =====================================================
     for (const entry of drivers) {
       const driverId = entry.driver._id.toString();
 
-      const latestState = dispatchState.get(rideKey);
+      const state = await getDispatch(rideKey);
 
       // 🔥 Always re-check latest rejection state
-      const lastRejected = latestState?.rejectedDrivers?.get?.(driverId);
+      const lastRejected = state.rejectedDrivers[driverId];
       const REJECTION_COOLDOWN = 20000;
 
       if (lastRejected && Date.now() - lastRejected < REJECTION_COOLDOWN) {
@@ -149,35 +154,23 @@ async function runDispatch(rideId, context) {
       return;
     }
 
-    const latestState = dispatchState.get(rideKey);
-
-    // 🔥 If all drivers are in cooldown, delay retry more
+    // =====================================================
+    // 🔥 COOLDOWN CHECK
+    // =====================================================
     const hasActiveDriver = drivers.some((entry) => {
       const driverId = entry.driver._id.toString();
-      const lastRejected = latestState?.rejectedDrivers?.get(driverId);
+      const lastRejected = state.rejectedDrivers[driverId];
 
       if (!lastRejected) return true;
 
-      return Date.now() - lastRejected > 20000;
+      return Date.now() - Number(lastRejected) > 20000;
     });
 
     const nextDelay = hasActiveDriver ? RETRY_DELAY : 15000;
 
     console.log(`⏳ Next retry in ${nextDelay / 1000}s`);
 
-    const scheduledAt = Date.now();
-
-    setTimeout(async () => {
-      const latestState = dispatchState.get(rideKey);
-
-      // 🔥 If new event happened → restart immediately
-      if (latestState?.lastEventAt && latestState.lastEventAt > scheduledAt) {
-        console.log(
-          "⚡ Dispatch interrupted by new event → restarting immediately",
-        );
-        return runDispatch(rideId, context);
-      }
-
+    setTimeout(() => {
       runDispatch(rideId, context);
     }, nextDelay);
   } catch (err) {

@@ -3,7 +3,10 @@ import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
-import { dispatchState } from "../../modules/dispatch/dispatch.store.js";
+import {
+  addRejected,
+  clearDispatch,
+} from "../../modules/dispatch/dispatch.redis.js";
 
 export async function cancelRideByDriverService({ rideId, driverId, reason }) {
   const session = await mongoose.startSession();
@@ -39,21 +42,26 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
         session,
       });
 
+      // ✅ COMMIT FIRST
       await session.commitTransaction();
-      dispatchState.addRejected(rideId.toString(), driverId);
 
-      const state = dispatchState.get(rideId.toString());
-      if (state) {
-        state.lastEventAt = Date.now();
-      }
+      // ✅ REDIS UPDATE (SAFE)
+      await addRejected(rideId.toString(), driverId).catch(() => {});
+
       console.log("🚫 Driver rejected (soft):", driverId);
       return ride;
     }
 
+    // =====================================================
+    // 🔥 CASE 2: ACCEPTED → HARD CANCEL (optional rule)
+    // =====================================================
     if (ride.status === "accepted") {
       throw new Error("❌ Cannot cancel after accepting ride");
     }
 
+    // =====================================================
+    // 🔥 HARD CANCEL FLOW
+    // =====================================================
     ride.status = "cancelled";
     ride.cancelledBy = "driver";
     ride.cancelReason = reason || "Driver cancelled";
@@ -80,7 +88,10 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
 
     await session.commitTransaction();
 
-    dispatchState.clear(rideId.toString());
+    // ✅ CLEAR REDIS STATE
+    await clearDispatch(rideId.toString()).catch(() => {});
+    console.log("❌ Driver cancelled ride:", driverId);
+    
     return ride;
   } catch (err) {
     await session.abortTransaction();

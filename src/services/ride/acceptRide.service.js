@@ -6,7 +6,10 @@ import mongoose from "mongoose";
 import { rideLog } from "../../utils/rideLogger.js";
 import { banner } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
-import { dispatchState } from "../../modules/dispatch/dispatch.store.js";
+import {
+  setAccepted,
+  clearDispatch,
+} from "../../modules/dispatch/dispatch.redis.js";
 
 export async function acceptRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -19,7 +22,9 @@ export async function acceptRideService({ rideId, driverId }) {
       `🚕 DRIVER TRY ACCEPT → ${driverId}`,
     );
 
-    // 🔍 Pre-check driver (no lock yet)
+    // =====================================================
+    // 🔍 DRIVER PRE-CHECK
+    // =====================================================
     const existingDriver = await Driver.findById(driverId);
 
     if (!existingDriver) {
@@ -62,9 +67,8 @@ export async function acceptRideService({ rideId, driverId }) {
     }
 
     // -----------------------------
-    // Lock Ride (atomic)
+    // 🔒 LOCK RIDE
     // -----------------------------
-
     const ride = await Ride.findOneAndUpdate(
       {
         _id: rideId,
@@ -83,7 +87,6 @@ export async function acceptRideService({ rideId, driverId }) {
       },
     );
 
-    
     if (!ride) {
       rideLog(
         rideId,
@@ -93,27 +96,40 @@ export async function acceptRideService({ rideId, driverId }) {
       );
       throw new Error("Ride expired / cancelled ❗");
     }
-    
-    dispatchState.setAccepted(ride._id.toString(), driverId);
+
+    // =====================================================
+    // ✅ COMMIT DB FIRST (CRITICAL)
+    // =====================================================
+    await session.commitTransaction();
+
+    // =====================================================
+    // 🔥 UPDATE REDIS AFTER COMMIT
+    // =====================================================
+    await setAccepted(ride._id.toString(), driverId);
     banner("RIDE CLAIMED");
 
     rideLog(rideId, "ACCEPT_SUCCESS", "Driver successfully claimed ride", {
       driverId,
     });
 
-    await session.commitTransaction();
-
     return ride.toObject();
   } catch (error) {
     await session.abortTransaction();
 
-    // 🔥 CRITICAL ROLLBACK
+    // =====================================================
+    // 🔥 DRIVER ROLLBACK
+    // =====================================================
     await Driver.findByIdAndUpdate(driverId, {
       $set: {
         driverState: "searching",
         currentRide: null,
       },
     });
+
+    // =====================================================
+    // 🔥 REDIS CLEANUP (VERY IMPORTANT)
+    // =====================================================
+    await clearDispatch(rideId.toString()).catch(() => {});
     throw error;
   } finally {
     session.endSession();

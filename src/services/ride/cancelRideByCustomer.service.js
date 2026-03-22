@@ -3,7 +3,7 @@ import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
-import { dispatchState } from "../../modules/dispatch/dispatch.store.js";
+import { clearDispatch } from "../../modules/dispatch/dispatch.redis.js";
 
 export async function cancelRideByCustomerService({ rideId, reason }) {
   const session = await mongoose.startSession();
@@ -14,12 +14,21 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     const ride = await Ride.findById(rideId).session(session);
     if (!ride) throw new Error("Ride not found");
 
-    if (ride.status === "cancelled") return ride;
+    // =====================================================
+    // ✅ IDEMPOTENT SAFE EXIT
+    // =====================================================
+    if (ride.status === "cancelled") {
+      await session.commitTransaction();
+      return ride;
+    }
 
     if (!["requested", "accepted", "arrived"].includes(ride.status)) {
       throw new Error("Ride cannot be cancelled");
     }
 
+    // =====================================================
+    // 🔥 UPDATE RIDE
+    // =====================================================
     ride.status = "cancelled";
     ride.cancelledBy = "customer";
     ride.cancelReason = reason || "No reason provided";
@@ -32,7 +41,9 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
       reason: ride.cancelReason,
     });
 
-    // reset driver
+    // =====================================================
+    // 🔄 RESET DRIVER (if exists)
+    // =====================================================
     if (ride.driver) {
       const driver = await Driver.findById(ride.driver).session(session);
 
@@ -49,9 +60,16 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
       }
     }
 
+    // =====================================================
+    // ✅ COMMIT FIRST
+    // =====================================================
     await session.commitTransaction();
 
-    dispatchState.clear(rideId.toString());
+    // =====================================================
+    // 🔥 CLEAR REDIS (SAFE)
+    // =====================================================
+    await clearDispatch(rideId.toString()).catch(() => {});
+    
     return ride;
   } catch (err) {
     await session.abortTransaction();

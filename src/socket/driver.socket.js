@@ -14,6 +14,8 @@ const driverLastLocations = new Map();
 // Broadcast drivers to map (throttled)
 setInterval(() => {
   const io = getIO();
+  if(!io) return;
+
   const drivers = Array.from(activeDrivers.values());
   if (!drivers.length) return;
 
@@ -23,6 +25,7 @@ setInterval(() => {
 export default function registerDriverHandlers(socket) {
   socket.on("register-driver", async (driverId) => {
     const io = getIO();
+    if(!io) return
 
     // 🔥 Kill old socket
     if (onlineDrivers.has(driverId)) {
@@ -176,6 +179,7 @@ export default function registerDriverHandlers(socket) {
       // If driver has ride → stream location to passenger
       if (driver.currentRide) {
         const io = getIO();
+        if(!io) return;
         const ride = await Ride.findById(driver.currentRide);
 
         if (!ride) return;

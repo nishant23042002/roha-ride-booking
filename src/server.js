@@ -6,6 +6,7 @@ import app from "./app.js";
 import { initSocket } from "./socket/index.js";
 import { connectDB } from "./config/db.js";
 import Driver from "./models/Driver.js";
+import redis from "./config/redis.js";
 
 dotenv.config();
 
@@ -27,6 +28,10 @@ const startServer = async () => {
   const server = http.createServer(app);
 
   initSocket(server);
+
+  await redis.set("test-key", "yatrigo-working");
+  const val = await redis.get("test-key");
+  console.log("✅ Redis Test:", val);
 
   setInterval(async () => {
     try {

@@ -18,7 +18,7 @@ export const initSocket = (server) => {
       methods: ["GET", "POST"],
     },
   });
- 
+
   io.on("connection", (socket) => {
     console.log("\n🟢 SOCKET CONNECTED:", socket.id);
 
@@ -41,7 +41,8 @@ export const initSocket = (server) => {
 
 export const getIO = () => {
   if (!io) {
-    throw new Error("Socket.io not initialized");
+    console.log("⚠️ IO not ready yet");
+    return null;
   }
   return io;
 };

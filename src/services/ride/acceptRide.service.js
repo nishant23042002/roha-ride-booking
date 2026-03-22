@@ -25,7 +25,7 @@ export async function acceptRideService({ rideId, driverId }) {
     // =====================================================
     // 🔍 DRIVER PRE-CHECK
     // =====================================================
-    const existingDriver = await Driver.findById(driverId);
+    const existingDriver = await Driver.findById(driverId).session(session);
 
     if (!existingDriver) {
       throw new Error("Driver not found");
@@ -126,10 +126,6 @@ export async function acceptRideService({ rideId, driverId }) {
       },
     });
 
-    // =====================================================
-    // 🔥 REDIS CLEANUP (VERY IMPORTANT)
-    // =====================================================
-    await clearDispatch(rideId.toString()).catch(() => {});
     throw error;
   } finally {
     session.endSession();

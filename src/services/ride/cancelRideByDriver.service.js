@@ -67,7 +67,6 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
     ride.cancelReason = reason || "Driver cancelled";
 
     await ride.save({ session });
-    console.log("❌ Driver cancelled ride:", driverId);
 
     banner("RIDE CANCELLED");
 
@@ -90,8 +89,8 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
 
     // ✅ CLEAR REDIS STATE
     await clearDispatch(rideId.toString()).catch(() => {});
+
     console.log("❌ Driver cancelled ride:", driverId);
-    
     return ride;
   } catch (err) {
     await session.abortTransaction();

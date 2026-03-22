@@ -35,12 +35,6 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
 
     await ride.save({ session });
 
-    banner("RIDE CANCELLED");
-
-    rideLog(ride._id, "CUSTOMER_CANCELLED", "Cancelled by customer", {
-      reason: ride.cancelReason,
-    });
-
     // =====================================================
     // 🔄 RESET DRIVER (if exists)
     // =====================================================
@@ -65,11 +59,16 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     // =====================================================
     await session.commitTransaction();
 
+    banner("RIDE CANCELLED");
+
+    rideLog(ride._id, "CUSTOMER_CANCELLED", "Cancelled by customer", {
+      reason: ride.cancelReason,
+    });
     // =====================================================
     // 🔥 CLEAR REDIS (SAFE)
     // =====================================================
     await clearDispatch(rideId.toString()).catch(() => {});
-    
+
     return ride;
   } catch (err) {
     await session.abortTransaction();

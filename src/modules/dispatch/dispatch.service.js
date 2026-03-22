@@ -103,14 +103,17 @@ async function runDispatch(rideId, context) {
     for (const entry of drivers) {
       const driverId = entry.driver._id.toString();
 
-      const state = await getDispatch(rideKey);
-
+      const REJECTION_COOLDOWN = 20000 * (context.attempt + 1);
       // 🔥 Always re-check latest rejection state
       const lastRejected = state.rejectedDrivers[driverId];
-      const REJECTION_COOLDOWN = 20000;
-
-      if (lastRejected && Date.now() - lastRejected < REJECTION_COOLDOWN) {
-        console.log("⏳ Recently rejected (cooldown):", driverId);
+      if (
+        lastRejected &&
+        Date.now() - Number(lastRejected) < REJECTION_COOLDOWN
+      ) {
+        console.log(
+          `⏳ Recently rejected (cooldown ${REJECTION_COOLDOWN / 1000}s):`,
+          driverId,
+        );
         continue;
       }
 
@@ -161,9 +164,11 @@ async function runDispatch(rideId, context) {
       const driverId = entry.driver._id.toString();
       const lastRejected = state.rejectedDrivers[driverId];
 
+      const REJECTION_COOLDOWN = 20000 * (context.attempt + 1);
+
       if (!lastRejected) return true;
 
-      return Date.now() - Number(lastRejected) > 20000;
+      return Date.now() - Number(lastRejected) > REJECTION_COOLDOWN;
     });
 
     const nextDelay = hasActiveDriver ? RETRY_DELAY : 15000;

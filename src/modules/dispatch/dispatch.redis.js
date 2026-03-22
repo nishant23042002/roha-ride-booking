@@ -59,10 +59,13 @@ export async function getDispatch(rideId) {
 // 🧹 CLEAR
 // =============================
 export async function clearDispatch(rideId) {
-  const key = PREFIX + rideId;
+  const pattern = `dispatch:${rideId}*`;
 
-  await redis.del(key);
-  await redis.del(key + ":rejected");
+  const keys = await redis.keys(pattern);
 
-  console.log("🧹 Redis Dispatch Cleared:", rideId);
+  if (keys.length > 0) {
+    await redis.del(...keys);
+  }
+
+  console.log("🧹 Redis Dispatch Cleared:", rideId, keys);
 }

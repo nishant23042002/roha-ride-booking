@@ -116,9 +116,7 @@ export const requestRide = async (req, res) => {
     const { driverIds } = await findBestDrivers({
       pickupLat: pickupLatitude,
       pickupLng: pickupLongitude,
-      vehicleType,
-      passengerCount,
-      heartbeatLimit: 30000,
+      rideId: ride.toString(), // 🔥 CRITICAL FIX
     });
 
     if (!driverIds.length) {

@@ -99,7 +99,7 @@ const driverSchema = new mongoose.Schema(
       },
       coordinates: {
         type: [Number], // [longitude, latitude]
-        default: undefined,
+        default: [0, 0],
       },
     },
 

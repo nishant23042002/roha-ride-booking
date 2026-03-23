@@ -1,33 +1,65 @@
 // src/services/driveRanking.js
 
-const TIER_WEIGHT = {
-  bronze: 4,
-  silver: 3,
-  gold: 2,
-  platinum: 1,
-  diamond: 0
-};
+export function rankDrivers(drivers) {
+  return drivers
+    .map((d) => {
+      const {
+        driver,
+        etaMinutes,
+        distanceKm,
+        rejectionCount = 0,
+        rejectionTime = 0, // 👈 ADD THIS FROM DISPATCH DATA
+      } = d;
 
-export function rankDrivers(driversWithETA) {
-  const ranked = driversWithETA.map((entry) => {
-    const { driver, etaMinutes } = entry;
+      // =====================================================
+      // 🧠 SMALL TOWN WEIGHTS
+      // =====================================================
+      const distanceScore = distanceKm * 2;
+      const etaScore = etaMinutes * 3;
 
-    const tierWeight = TIER_WEIGHT[driver.tier] ?? 3;
+      // =====================================================
+      // 🔥 REJECTION DECAY LOGIC (IMPORTANT)
+      // =====================================================
+      const PENALTY_WINDOW = 60000; // 60 sec
 
-    const idleMinutes =
-      (Date.now() - new Date(driver.lastRideCompleted || Date.now())) /
-      (1000 * 60);
+      let effectiveRejects = 0;
 
-    const score =
-      etaMinutes * 0.7 + tierWeight * 2 + (1 / (idleMinutes + 1)) * 5;
+      if (rejectionTime) {
+        const age = Date.now() - rejectionTime;
 
-    return {
-      ...entry,
-      score,
-    };
-  });
+        // 🔥 gradual decay instead of hard cut
+        if (age < PENALTY_WINDOW) {
+          const decayFactor = 1 - age / PENALTY_WINDOW;
+          effectiveRejects = rejectionCount * decayFactor;
+        }
+      }
+      if (effectiveRejects > 0 && effectiveRejects < 1) {
+        // ignore tiny penalty (noise)
+        effectiveRejects = 0;
+      }
 
-  ranked.sort((a, b) => a.score - b.score);
+      const rejectionPenalty = effectiveRejects * 1.5;
 
-  return ranked;
+      // =====================================================
+      // 🕒 FRESHNESS
+      // =====================================================
+      const lastSeen = new Date(driver.lastHeartbeat).getTime() || Date.now();
+
+      const freshnessMinutes = (Date.now() - lastSeen) / (1000 * 60);
+
+      const freshnessPenalty = freshnessMinutes > 1 ? 5 : 0;
+
+      // =====================================================
+      // 🎯 FINAL SCORE
+      // =====================================================
+      const score =
+        distanceScore + etaScore + rejectionPenalty + freshnessPenalty;
+
+      return {
+        ...d,
+        score,
+        effectiveRejects,
+      };
+    })
+    .sort((a, b) => a.score - b.score);
 }

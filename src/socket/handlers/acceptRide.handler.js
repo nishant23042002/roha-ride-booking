@@ -1,13 +1,11 @@
 // /src/socket/handlers/acceptRideHandler.js
 
 import { acceptRideService } from "../../services/ride/acceptRide.service.js";
-import { withRetry } from "../../utils/withRetry.js";
 import { getIO, onlineCustomers, onlineDrivers } from "../index.js";
-
 
 export default async function acceptRideHandler(socket, { rideId, driverId }) {
   try {
-    const ride = await withRetry(() => acceptRideService({ rideId, driverId }));
+    const ride = await acceptRideService({ rideId, driverId });
 
     const io = getIO();
 
@@ -28,6 +26,11 @@ export default async function acceptRideHandler(socket, { rideId, driverId }) {
       }
     }
   } catch (err) {
+    if (err.message.includes("already taken")) {
+      socket.emit("ride-taken", rideId);
+      return; // 🔥 prevent duplicate logs
+    }
+
     console.log("❌ ACCEPT RIDE ERROR:", err.message);
     socket.emit("ride-error", err.message);
   }

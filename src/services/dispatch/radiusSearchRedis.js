@@ -1,90 +1,52 @@
-// src/services/radiusSearch.js
-
-import Driver from "../../models/Driver.js";
-import mongoose from "mongoose";
 import { findNearbyDrivers } from "../../modules/geo/geo.redis.js";
-import { driverStateCache } from "../../socket/driver.socket.js";
+import { getMultipleDriverStates } from "../../modules/driverState/driverState.redis.js";
+import { getActiveDrivers } from "../../modules/driverState/driverHeartbeat.redis.js";
 
 const SEARCH_RADII = [1, 2, 3, 5]; // km
 
-export async function radiusDriverSearch({
-  pickupLat,
-  pickupLng,
-  vehicleType,
-  passengerCount,
-  heartbeatLimit,
-}) {
+export async function radiusDriverSearch({ pickupLat, pickupLng }) {
   for (const radiusKm of SEARCH_RADII) {
     console.log(`🔍 [REDIS GEO] Searching within ${radiusKm} km`);
 
-    // =============================
-    // 1️⃣ GET DRIVER IDS FROM REDIS
-    // =============================
     const nearby = await findNearbyDrivers(pickupLat, pickupLng, radiusKm);
 
-    // 🔥 DEBUG (keep this for now)
-    console.log("🧠 GEO RAW:", nearby);
-
-    if (!nearby || !nearby.length) {
+    if (!nearby?.length) {
       console.log(`📊 No drivers in ${radiusKm} km`);
       continue;
     }
 
-    // =============================
-    // 2️⃣ EXTRACT IDS SAFELY
-    // =============================
+    // ✅ Extract IDs
     const driverIds = nearby.map((d) =>
-      typeof d === "string" ? d : d.member || d.driverId,
+      typeof d === "string" ? d : d.member || d,
     );
 
-    console.log("🧠 GEO IDS:", driverIds);
+    // =============================
+    // 🔥 GET STATE + HEARTBEAT
+    // =============================
+    const [stateMap, activeDrivers] = await Promise.all([
+      getMultipleDriverStates(driverIds),
+      getActiveDrivers(30000), // last 30 sec
+    ]);
+
+    const activeSet = new Set(activeDrivers);
 
     // =============================
-    // 3️⃣ CONVERT TO OBJECT IDS
+    // ✅ FINAL FILTER
     // =============================
-    const objectIds = driverIds
-      .filter((id) => mongoose.Types.ObjectId.isValid(id))
-      .map((id) => new mongoose.Types.ObjectId(id));
+    const availableDrivers = driverIds.filter(
+      (id) => stateMap[id] === "searching" && activeSet.has(id),
+    );
 
-    if (!objectIds.length) continue;
+    console.log(`📊 Available drivers: ${availableDrivers.length}`);
 
-    // =============================
-    // 4️⃣ FETCH FROM MONGO
-    // =============================
-    const drivers = await Driver.find({
-      _id: { $in: objectIds },
-      driverState: "searching",
-      vehicleType,
-      isOnline: true,
-      vehicleCapacity: { $gte: passengerCount },
-      lastHeartbeat: {
-        $gte: new Date(Date.now() - heartbeatLimit),
-      },
-    }).limit(20);
-
-    const filteredDrivers = drivers.filter((driver) => {
-      const state = driverStateCache.get(driver._id.toString());
-
-      // fallback to DB if cache missing
-      return state ? state === "searching" : true;
-    });
-
-    console.log(`📊 Drivers after filtering: ${filteredDrivers.length}`);
-
-    if (filteredDrivers.length) {
-      console.log(`✅ Radius search stopped at ${radiusKm} km`);
-
+    if (availableDrivers.length) {
       return {
-        drivers: filteredDrivers,
-        radius: radiusKm * 1000, // meters (keep compatibility)
+        driverIds: availableDrivers,
+        radius: radiusKm * 1000,
       };
     }
   }
 
-  console.log("❌ No drivers found in any radius");
-
-  return {
-    drivers: [],
-    radius: null,
-  };
+  console.log("❌ No drivers found");
+  return { driverIds: [], radius: null };
 }

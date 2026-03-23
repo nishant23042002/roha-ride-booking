@@ -113,7 +113,7 @@ export const requestRide = async (req, res) => {
       passengerCount,
     });
 
-    const { drivers } = await findBestDrivers({
+    const { driverIds } = await findBestDrivers({
       pickupLat: pickupLatitude,
       pickupLng: pickupLongitude,
       vehicleType,
@@ -121,7 +121,7 @@ export const requestRide = async (req, res) => {
       heartbeatLimit: 30000,
     });
 
-    if (!drivers.length) {
+    if (!driverIds.length) {
       console.log("❌ No drivers available nearby");
 
       return res.status(404).json({

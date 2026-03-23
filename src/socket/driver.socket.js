@@ -12,9 +12,14 @@ import {
   removeDriver,
 } from "../modules/geo/geo.redis.js";
 import {
+  getDriverState,
   removeDriverState,
   setDriverState,
 } from "../modules/driverState/driverState.redis.js";
+import {
+  updateHeartbeat,
+  removeHeartbeat,
+} from "../modules/driverState/driverHeartbeat.redis.js";
 
 const GPS_CONFIG = {
   searching: {
@@ -38,7 +43,6 @@ const DB_UPDATE_INTERVAL = 10000; // 10 sec
 const activeDrivers = new Map();
 const driverLastLocations = new Map();
 const driverLastDBUpdate = new Map();
-export const driverStateCache = new Map();
 
 // =============================
 // 📡 BROADCAST TO MAP (THROTTLED)
@@ -96,8 +100,7 @@ export default function registerDriverHandlers(socket) {
 
     // ✅ ALWAYS SYNC REDIS STATE
     await setDriverState(driverId, driver.driverState || "searching");
-    // Cache driver state
-    driverStateCache.set(driverId, driver.driverState);
+    await updateHeartbeat(driverId);
 
     // =============================
     // 🧹 CLEAN STALE RIDE
@@ -115,7 +118,6 @@ export default function registerDriverHandlers(socket) {
         await driver.save();
 
         await setDriverState(driverId, "searching");
-        driverStateCache.set(driverId, "searching");
       } else {
         // ✅ valid ride → RESUME
         console.log("🔁 Resuming ride:", ride._id);
@@ -142,9 +144,7 @@ export default function registerDriverHandlers(socket) {
   socket.on("driver-heartbeat", async (driverId) => {
     if (!rateLimit(`hb-${driverId}`, 5, 5000)) return;
 
-    await Driver.findByIdAndUpdate(driverId, {
-      lastHeartbeat: new Date(),
-    });
+    await updateHeartbeat(driverId);
 
     throttledLog(`heartbeat-${driverId}`, 5000, `💓 HEARTBEAT → ${driverId}`);
   });
@@ -177,12 +177,14 @@ export default function registerDriverHandlers(socket) {
         }
       }
       const smoothed = smoothLocation(last, { lat, lng });
+
+      await updateHeartbeat(driverId)
       throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE");
 
       // =============================
       // 🧠 REDIS UPDATE DECISION
       // =============================
-      let driverState = driverStateCache.get(driverId) || "searching";
+      const driverState = (await getDriverState(driverId)) || "searching";
 
       const config = GPS_CONFIG[driverState] || GPS_CONFIG.searching;
       let shouldUpdateRedis = false;
@@ -284,7 +286,7 @@ export default function registerDriverHandlers(socket) {
         lastHeartbeat: new Date(),
       });
 
-      driverStateCache.set(driverId, "searching");
+      await updateHeartbeat(driverId)
       await setDriverState(driverId, "searching");
 
       console.log("🟢 DRIVER ONLINE:", driverId);
@@ -304,9 +306,10 @@ export default function registerDriverHandlers(socket) {
         currentRide: null,
       });
 
+      await removeHeartbeat(driverId)
       activeDrivers.delete(driverId);
       driverLastLocations.delete(driverId);
-      driverStateCache.delete(driverId);
+
       driverLastDBUpdate.delete(driverId);
 
       onlineDrivers.delete(driverId);

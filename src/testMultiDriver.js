@@ -59,7 +59,7 @@ drivers.forEach((driver) => {
   socket.on("new-ride", (ride) => {
     banner(`DRIVER ${driver.id} RECEIVED RIDE`);
 
-    const delay = Math.random() * 2000;
+    const delay = 0;
 
     setTimeout(() => {
       socket.emit("accept-ride", {

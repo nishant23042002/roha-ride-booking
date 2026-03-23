@@ -1,61 +1,28 @@
-// src/services/dispatchEngine.js
+// src/services/dispatch/dispatchEngine.js
 
 import { radiusDriverSearch } from "./radiusSearchRedis.js";
-import { calculateDriverETA } from "./etaCalculator.js";
-import { rankDrivers } from "./rankDrivers.js";
 
-export async function findBestDrivers({
-  pickupLat,
-  pickupLng,
-  vehicleType,
-  passengerCount,
-  heartbeatLimit,
-}) {
-  const { drivers, radius } = await radiusDriverSearch({
+export async function findBestDrivers({ pickupLat, pickupLng }) {
+  const { driverIds, radius } = await radiusDriverSearch({
     pickupLat,
     pickupLng,
-    vehicleType,
-    passengerCount,
-    heartbeatLimit,
   });
 
   console.log("\n🔍 FIND BEST DRIVERS START");
   console.log("Pickup:", pickupLat, pickupLng);
-  console.log("Vehicle:", vehicleType);
 
-  if (!drivers.length) {
-    return { drivers: [], radius };
+  if (!driverIds.length) {
+    console.log("❌ No drivers found after Redis filtering");
+    return { driverIds: [], radius };
   }
 
-  const driversWithETA = drivers
-    .map((driver) => {
-      const result = calculateDriverETA(driver, pickupLat, pickupLng);
-      if (!result) return null;
-
-      return {
-        driver,
-        ...result,
-      };
-    })
-    .filter(Boolean);
-
-  // 🔥 ADD THIS
-  if (!driversWithETA.length) {
-    console.log("❌ All drivers filtered out after ETA calculation");
-    return { drivers: [], radius };
-  }
-
-  const ranked = rankDrivers(driversWithETA);
-
-  console.log("🏁 Ranked Drivers:");
-  ranked.forEach((d, i) => {
-    console.log(
-      `#${i + 1} Driver=${d.driver._id} ETA=${d.etaMinutes} Score=${d.score}`,
-    );
+  console.log("🏁 Selected Drivers:");
+  driverIds.forEach((id, i) => {
+    console.log(`#${i + 1} Driver=${id}`);
   });
 
   return {
-    drivers: ranked,
+    driverIds,
     radius,
   };
 }

@@ -38,6 +38,9 @@ async function runDispatch(rideId, context) {
     console.log(`🔁 Dispatch Attempt ${context.attempt + 1}`);
     console.log("------------------------------");
 
+    // =====================================================
+    // 🔥 MINIMAL DB READ (ONLY RIDE)
+    // =====================================================
     const ride = await Ride.findById(rideId);
 
     if (!ride) {
@@ -57,13 +60,12 @@ async function runDispatch(rideId, context) {
     }
 
     const batchSize = BATCHES[context.attempt];
-
     console.log("📦 Batch size:", batchSize);
 
     // =====================================================
     // 🔍 FIND DRIVERS
     // =====================================================
-    const { drivers } = await findBestDrivers({
+    const { driverIds } = await findBestDrivers({
       pickupLat: ride.pickupLocation.coordinates[1],
       pickupLng: ride.pickupLocation.coordinates[0],
       vehicleType: ride.vehicleType,
@@ -71,7 +73,7 @@ async function runDispatch(rideId, context) {
       heartbeatLimit: 30000,
     });
 
-    console.log("📊 Total drivers found:", drivers.length);
+    console.log("📊 Total drivers found:", driverIds.length);
 
     const io = getIO();
     if (!io) {
@@ -81,54 +83,68 @@ async function runDispatch(rideId, context) {
 
     let sent = 0;
 
-    console.log("🧠 Eligible drivers (before filtering):", drivers.length);
+    console.log("🧠 Eligible drivers (before filtering):", driverIds.length);
 
     // =====================================================
     // 📡 DISPATCH TO DRIVERS
     // =====================================================
     const rideKey = rideId.toString();
-    const state = await getDispatch(rideKey);
-
-    if (state.acceptedDriver) {
-      console.log(
-        "🛑 Dispatch stopped → driver accepted:",
-        state.acceptedDriver,
-      );
-      return;
-    }
 
     // =====================================================
-    // 📡 DISPATCH LOOP
+    // 📡 DISPATCH LOOP (REDIS-FIRST, RACE SAFE)
     // =====================================================
-    for (const entry of drivers) {
-      const driverId = entry.driver._id.toString();
+    for (const driverId of driverIds) {
+      // 🔥 ALWAYS re-check Redis state (race safety)
+      const state = await getDispatch(rideKey);
 
+      if (state.acceptedDriver) {
+        console.log(
+          "🛑 Dispatch stopped → driver accepted:",
+          state.acceptedDriver,
+        );
+        return;
+      }
+
+      // =====================================================
+      // ❌ SKIP OFFLINE SOCKET (TEMP - can move to Redis later)
+      // =====================================================
+      if (!onlineDrivers.has(driverId)) continue;
+
+      // =====================================================
+      // ⏳ REJECTION COOLDOWN
+      // =====================================================
       const REJECTION_COOLDOWN = 20000 * (context.attempt + 1);
-      // 🔥 Always re-check latest rejection state
+
       const lastRejected = state.rejectedDrivers[driverId];
+
       if (
         lastRejected &&
         Date.now() - Number(lastRejected) < REJECTION_COOLDOWN
       ) {
         console.log(
-          `⏳ Recently rejected (cooldown ${REJECTION_COOLDOWN / 1000}s):`,
+          `⏳ Recently rejected (${REJECTION_COOLDOWN / 1000}s):`,
           driverId,
         );
         continue;
       }
 
-      // 🔥 Notify cooldown
+      // =====================================================
+      // ⏳ NOTIFY COOLDOWN (ANTI-SPAM)
+      // =====================================================
       const lastTime = context.lastNotifiedAt.get(driverId);
+
       if (lastTime && Date.now() - lastTime < 8000) {
         console.log("⏳ Notify cooldown:", driverId);
         continue;
       }
 
-      if (!onlineDrivers.has(driverId)) continue;
-
+      // =====================================================
+      // 📡 SEND RIDE REQUEST
+      // =====================================================
       const socketId = onlineDrivers.get(driverId);
+      if (!socketId) continue;
 
-      console.log(`📡 Smart Dispatch → ${driverId}`);
+      console.log(`📡 Dispatch → ${driverId}`);
 
       io.to(socketId).emit("new-ride", {
         ...(ride.toObject ? ride.toObject() : ride),
@@ -150,6 +166,9 @@ async function runDispatch(rideId, context) {
 
     context.attempt++;
 
+    // =====================================================
+    // 🔄 CHECK AGAIN BEFORE NEXT RETRY
+    // =====================================================
     const latestRide = await Ride.findById(rideId);
 
     if (!latestRide || latestRide.status !== "requested") {
@@ -158,10 +177,11 @@ async function runDispatch(rideId, context) {
     }
 
     // =====================================================
-    // 🔥 COOLDOWN CHECK
+    // 🔥 SMART DELAY LOGIC
     // =====================================================
-    const hasActiveDriver = drivers.some((entry) => {
-      const driverId = entry.driver._id.toString();
+    const state = await getDispatch(rideKey);
+
+    const hasActiveDriver = driverIds.some((driverId) => {
       const lastRejected = state.rejectedDrivers[driverId];
 
       const REJECTION_COOLDOWN = 20000 * (context.attempt + 1);

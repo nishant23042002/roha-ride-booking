@@ -7,6 +7,8 @@ import {
   addRejected,
   clearDispatch,
 } from "../../modules/dispatch/dispatch.redis.js";
+import { getIO, onlineCustomers } from "../../socket/index.js";
+import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
 
 export async function cancelRideByDriverService({ rideId, driverId, reason }) {
   const session = await mongoose.startSession();
@@ -17,19 +19,17 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
     const ride = await Ride.findById(rideId).session(session);
     if (!ride) throw new Error("Ride not found");
 
-    // ✅ idempotent
     if (ride.status === "cancelled") return ride;
 
     const driver = await Driver.findById(driverId).session(session);
     if (!driver) throw new Error("Driver not found");
 
     // =============================
-    // 🔥 CASE 1: REQUESTED → SOFT CANCEL (REJECT)
+    // 🔥 SOFT CANCEL (REQUESTED)
     // =============================
     if (ride.status === "requested") {
       ride.driver = null;
 
-      // optional tracking
       const rejectedSet = new Set(ride.rejectedDrivers || []);
       rejectedSet.add(driverId);
       ride.rejectedDrivers = [...rejectedSet];
@@ -42,38 +42,29 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
         session,
       });
 
-      // ✅ COMMIT FIRST
       await session.commitTransaction();
 
-      // ✅ REDIS UPDATE (SAFE)
       await addRejected(rideId.toString(), driverId).catch(() => {});
 
       console.log("🚫 Driver rejected (soft):", driverId);
       return ride;
     }
 
-    // =====================================================
-    // 🔥 CASE 2: ACCEPTED → HARD CANCEL (optional rule)
-    // =====================================================
+    // =============================
+    // ❌ BLOCK ACCEPTED CANCEL (RULE)
+    // =============================
     if (ride.status === "accepted") {
       throw new Error("❌ Cannot cancel after accepting ride");
     }
 
-    // =====================================================
-    // 🔥 HARD CANCEL FLOW
-    // =====================================================
+    // =============================
+    // 🔥 HARD CANCEL
+    // =============================
     ride.status = "cancelled";
     ride.cancelledBy = "driver";
     ride.cancelReason = reason || "Driver cancelled";
 
     await ride.save({ session });
-
-    banner("RIDE CANCELLED");
-
-    rideLog(ride._id, "DRIVER_CANCELLED", "Cancelled by driver", {
-      driverId,
-      reason: ride.cancelReason,
-    });
 
     driver.currentRide = null;
 
@@ -87,10 +78,34 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
 
     await session.commitTransaction();
 
-    // ✅ CLEAR REDIS STATE
+    banner("RIDE CANCELLED");
+
+    rideLog(ride._id, "DRIVER_CANCELLED", "Cancelled by driver", {
+      driverId,
+      reason: ride.cancelReason,
+    });
+
+    // =============================
+    // 🔥 CLEANUP
+    // =============================
     await clearDispatch(rideId.toString()).catch(() => {});
+    cancelRecovery(driverId);
+
+    // =============================
+    // 📣 NOTIFY CUSTOMER
+    // =============================
+    const io = getIO();
+    const socketId = onlineCustomers.get(ride.customer.toString());
+
+    if (io && socketId) {
+      io.to(socketId).emit("driver-cancelled", {
+        rideId,
+        reason: ride.cancelReason,
+      });
+    }
 
     console.log("❌ Driver cancelled ride:", driverId);
+
     return ride;
   } catch (err) {
     await session.abortTransaction();

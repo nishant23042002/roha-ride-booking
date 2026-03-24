@@ -1,11 +1,11 @@
-// /src/services/ride/arriveRideService.js
-
 import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import mongoose from "mongoose";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
+import { getIO, onlineCustomers } from "../../socket/index.js";
+import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
 
 export async function arriveRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -19,7 +19,7 @@ export async function arriveRideService({ rideId, driverId }) {
       `📍 DRIVER ARRIVING → ${driverId}`,
     );
 
-    rideLog(rideId, "ARRIVAL_ATTEMPT", "Driver reporting arrival at pickup", {
+    rideLog(rideId, "ARRIVAL_ATTEMPT", "Driver reporting arrival", {
       driverId,
     });
 
@@ -67,7 +67,24 @@ export async function arriveRideService({ rideId, driverId }) {
 
     await session.commitTransaction();
 
-    rideLog(rideId, "DRIVER_ARRIVED", "Driver reached pickup location", {
+    // =============================
+    // 🔥 CRITICAL: CANCEL RECOVERY
+    // =============================
+    cancelRecovery(driverId);
+
+    // =============================
+    // 📣 NOTIFY CUSTOMER
+    // =============================
+    const io = getIO();
+    const socketId = onlineCustomers.get(ride.customer.toString());
+
+    if (io && socketId) {
+      io.to(socketId).emit("driver-arrived", {
+        rideId,
+      });
+    }
+
+    rideLog(rideId, "DRIVER_ARRIVED", "Driver reached pickup", {
       driverId,
     });
 

@@ -4,6 +4,8 @@ import mongoose from "mongoose";
 import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 import { clearDispatch } from "../../modules/dispatch/dispatch.redis.js";
+import { getIO, onlineDrivers } from "../../socket/index.js";
+import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
 
 export async function cancelRideByCustomerService({ rideId, reason }) {
   const session = await mongoose.startSession();
@@ -14,9 +16,7 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     const ride = await Ride.findById(rideId).session(session);
     if (!ride) throw new Error("Ride not found");
 
-    // =====================================================
-    // ✅ IDEMPOTENT SAFE EXIT
-    // =====================================================
+    // ✅ idempotent
     if (ride.status === "cancelled") {
       await session.commitTransaction();
       return ride;
@@ -26,26 +26,28 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
       throw new Error("Ride cannot be cancelled");
     }
 
-    // =====================================================
+    const driverId = ride.driver?.toString();
+
+    // =============================
     // 🔥 UPDATE RIDE
-    // =====================================================
+    // =============================
     ride.status = "cancelled";
     ride.cancelledBy = "customer";
     ride.cancelReason = reason || "No reason provided";
 
     await ride.save({ session });
 
-    // =====================================================
-    // 🔄 RESET DRIVER (if exists)
-    // =====================================================
-    if (ride.driver) {
-      const driver = await Driver.findById(ride.driver).session(session);
+    // =============================
+    // 🔄 RESET DRIVER
+    // =============================
+    if (driverId) {
+      const driver = await Driver.findById(driverId).session(session);
 
       if (driver) {
         driver.currentRide = null;
 
         await changeDriverState({
-          driverId: driver._id,
+          driverId,
           newState: "searching",
           session,
         });
@@ -54,9 +56,6 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
       }
     }
 
-    // =====================================================
-    // ✅ COMMIT FIRST
-    // =====================================================
     await session.commitTransaction();
 
     banner("RIDE CANCELLED");
@@ -64,10 +63,27 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     rideLog(ride._id, "CUSTOMER_CANCELLED", "Cancelled by customer", {
       reason: ride.cancelReason,
     });
-    // =====================================================
-    // 🔥 CLEAR REDIS (SAFE)
-    // =====================================================
+
+    // =============================
+    // 🔥 CLEAR DISPATCH + RECOVERY
+    // =============================
     await clearDispatch(rideId.toString()).catch(() => {});
+    if (driverId) cancelRecovery(driverId);
+
+    // =============================
+    // 📣 NOTIFY DRIVER
+    // =============================
+    if (driverId) {
+      const io = getIO();
+      const socketId = onlineDrivers.get(driverId);
+
+      if (io && socketId) {
+        io.to(socketId).emit("ride-cancelled", {
+          rideId,
+          reason: ride.cancelReason,
+        });
+      }
+    }
 
     return ride;
   } catch (err) {

@@ -7,6 +7,8 @@ import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
 import { setDriverState } from "../../modules/driverState/driverState.redis.js";
+import { getIO, onlineCustomers } from "../../socket/index.js";
+import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
 
 export async function startRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -76,6 +78,28 @@ export async function startRideService({ rideId, driverId }) {
     });
 
     await session.commitTransaction();
+
+    // =============================
+    // 🔥 CRITICAL: CANCEL RECOVERY
+    // =============================
+    cancelRecovery(driverId);
+
+    // =============================
+    // 🔄 REDIS SYNC (SAFE)
+    // =============================
+    await setDriverState(driverId, "on_trip").catch(() => {});
+
+    // =============================
+    // 📣 NOTIFY CUSTOMER
+    // =============================
+    const io = getIO();
+    const socketId = onlineCustomers.get(ride.customer.toString());
+
+    if (io && socketId) {
+      io.to(socketId).emit("ride-started", {
+        rideId,
+      });
+    }
 
     rideLog(rideId, "RIDE_STARTED", "Ride has officially started", {
       driverId,

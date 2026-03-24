@@ -119,7 +119,7 @@ export const requestRide = async (req, res) => {
       rideId: ride.toString(), // 🔥 CRITICAL FIX
     });
 
-    if (!driverIds.length) {
+    if (!driverIds || !driverIds.length) {
       console.log("❌ No drivers available nearby");
 
       return res.status(404).json({

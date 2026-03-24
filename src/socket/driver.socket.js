@@ -7,10 +7,7 @@ import { haversineDistance, smoothLocation } from "../utils/gpsUtils.js";
 import { disconnectTimers } from "./index.js";
 import { throttledLog } from "../core/logger/logger.js";
 import { rateLimit } from "../core/rateLimiter.js";
-import {
-  updateDriverLocation,
-  removeDriver,
-} from "../modules/geo/geo.redis.js";
+import { updateDriverLocation } from "../modules/geo/geo.redis.js";
 import {
   getDriverState,
   removeDriverState,
@@ -20,6 +17,7 @@ import {
   updateHeartbeat,
   removeHeartbeat,
 } from "../modules/driverState/driverHeartbeat.redis.js";
+import { cancelRecovery } from "../modules/recovery/recovery.manager.js";
 
 const GPS_CONFIG = {
   searching: {
@@ -68,7 +66,19 @@ export default function registerDriverHandlers(socket) {
     const io = getIO();
     if (!io) return;
 
-    // 🔥 Kill old socket
+    const driver = await Driver.findById(driverId);
+
+    // 🔥 cancel recovery ONLY if still owner
+    if (driver?.currentRide) {
+      const ride = await Ride.findById(driver.currentRide);
+
+      if (ride && ride.driver?.toString() === driverId) {
+        cancelRecovery(driverId);
+        console.log("🧠 Recovery cancelled (driver returned)");
+      }
+    }
+
+    // 🔥 kill old socket
     if (onlineDrivers.has(driverId)) {
       const oldId = onlineDrivers.get(driverId);
 
@@ -78,7 +88,7 @@ export default function registerDriverHandlers(socket) {
       }
     }
 
-    // 🔥 Cancel disconnect timer
+    // 🔥 cancel disconnect timer
     if (disconnectTimers.has(driverId)) {
       clearTimeout(disconnectTimers.get(driverId));
       disconnectTimers.delete(driverId);
@@ -92,50 +102,70 @@ export default function registerDriverHandlers(socket) {
     socket.join(`driver:${driverId}`);
 
     console.log("✅ DRIVER REGISTERED:", driverId);
-    console.log("📡 Active drivers:", onlineDrivers.size);
-
-    // 🔥 Fetch driver
-    const driver = await Driver.findById(driverId);
-    if (!driver) return;
-
-    // ✅ ALWAYS SYNC REDIS STATE
-    await setDriverState(driverId, driver.driverState || "searching");
-    await updateHeartbeat(driverId);
 
     // =============================
-    // 🧹 CLEAN STALE RIDE
+    // 🔥 RESTORE STATE (SINGLE SOURCE)
     // =============================
-    if (driver.currentRide) {
+    let safeState = "searching";
+
+    // 🔥 SINGLE SOURCE OF TRUTH
+    if (driver?.currentRide) {
       const ride = await Ride.findById(driver.currentRide);
 
-      if (!ride || ["completed", "cancelled"].includes(ride.status)) {
-        // ❌ stale ride → CLEAN IT
-        console.log("🧹 Cleaning stale currentRide:", driver.currentRide);
+      if (ride && ride.driver?.toString() === driverId) {
+        if (!["completed", "cancelled"].includes(ride.status)) {
+          const mappedState =
+            ride.status === "accepted"
+              ? "to_pickup"
+              : ride.status === "arrived"
+                ? "arrived"
+                : ride.status === "ongoing"
+                  ? "on_trip"
+                  : "searching";
 
-        driver.currentRide = null;
-        driver.driverState = "searching";
+          socket.join(`ride:${ride._id}`);
 
-        await driver.save();
+          socket.emit("ride-restored", {
+            ride: ride.toObject(),
+            state: mappedState,
+            status: ride.status,
+            isRecovery: !!ride.recovery,
+          });
 
-        await setDriverState(driverId, "searching");
-      } else {
-        // ✅ valid ride → RESUME
-        console.log("🔁 Resuming ride:", ride._id);
+          console.log("🔁 Ride restored:", ride._id);
 
-        socket.join(`ride:${ride._id}`);
+          safeState = mappedState;
+        } else {
+          // cleanup invalid ride
+          await Driver.findByIdAndUpdate(driverId, {
+            currentRide: null,
+            driverState: "searching",
+          });
 
-        socket.emit("resume-ride", {
-          rideId: ride._id,
-          state: driver.driverState,
-        });
+          safeState = "searching";
+        }
       }
     }
 
-    // 🔥 Mark online AFTER cleanup
+    // 🔥 FINAL STATE SYNC (ONCE ONLY)
     await Driver.findByIdAndUpdate(driverId, {
       isOnline: true,
+      driverState: safeState,
       lastHeartbeat: new Date(),
     });
+
+    await setDriverState(driverId, safeState).catch(() => {});
+    await updateHeartbeat(driverId).catch(() => {});
+
+    // =============================
+    // 📍 ENSURE GEO EXISTS ON CONNECT
+    // =============================
+    if (driver?.currentLocation?.coordinates) {
+      const [lng, lat] = driver.currentLocation.coordinates;
+
+      await updateDriverLocation(driverId, lat, lng).catch(() => {});
+      console.log("📍 GEO INIT (REGISTER):", driverId);
+    }
   });
 
   // =============================
@@ -144,7 +174,33 @@ export default function registerDriverHandlers(socket) {
   socket.on("driver-heartbeat", async (driverId) => {
     if (!rateLimit(`hb-${driverId}`, 5, 5000)) return;
 
-    await updateHeartbeat(driverId);
+    // =============================
+    // 💓 HEARTBEAT = SOURCE OF TRUTH
+    // =============================
+
+    // cancel disconnect if active
+    if (disconnectTimers.has(driverId)) {
+      clearTimeout(disconnectTimers.get(driverId));
+      disconnectTimers.delete(driverId);
+    }
+
+    // update Mongo (CRITICAL)
+    await Driver.findByIdAndUpdate(driverId, {
+      lastHeartbeat: new Date(),
+      isOnline: true,
+    }).catch(() => {});
+
+    // Redis optional
+    await updateHeartbeat(driverId).catch(() => {});
+
+    // =============================
+    // 📍 REFRESH GEO TTL (IMPORTANT)
+    // =============================
+    const last = driverLastLocations.get(driverId);
+
+    if (last) {
+      updateDriverLocation(driverId, last.lat, last.lng).catch(() => {});
+    }
 
     throttledLog(`heartbeat-${driverId}`, 5000, `💓 HEARTBEAT → ${driverId}`);
   });
@@ -178,19 +234,28 @@ export default function registerDriverHandlers(socket) {
       }
       const smoothed = smoothLocation(last, { lat, lng });
 
-      await updateHeartbeat(driverId)
+      await updateHeartbeat(driverId).catch(() => {});
       throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE");
 
       // =============================
       // 🧠 REDIS UPDATE DECISION
       // =============================
-      const driverState = (await getDriverState(driverId)) || "searching";
+      let driverState = await getDriverState(driverId);
+
+      if (!driverState) {
+        const driver = await Driver.findById(driverId);
+        driverState = driver?.driverState || "searching";
+      }
 
       const config = GPS_CONFIG[driverState] || GPS_CONFIG.searching;
       let shouldUpdateRedis = false;
 
       if (!last) {
         shouldUpdateRedis = true;
+
+        await updateDriverLocation(driverId, smoothed.lat, smoothed.lng).catch(
+          () => {},
+        );
       } else {
         const distance = haversineDistance(
           last.lat,
@@ -280,14 +345,28 @@ export default function registerDriverHandlers(socket) {
   // =============================
   socket.on("driver-go-online", async (driverId) => {
     try {
-      await Driver.findByIdAndUpdate(driverId, {
-        isOnline: true,
-        driverState: "searching",
-        lastHeartbeat: new Date(),
-      });
+      const driver = await Driver.findById(driverId);
 
-      await updateHeartbeat(driverId)
-      await setDriverState(driverId, "searching");
+      if (!driver?.currentRide) {
+        await Driver.findByIdAndUpdate(driverId, {
+          isOnline: true,
+          driverState: "searching",
+          lastHeartbeat: new Date(),
+        }).catch(() => {});
+      }
+
+      await updateHeartbeat(driverId).catch(() => {});
+      await setDriverState(driverId, "searching").catch(() => {});
+
+      // =============================
+      // 📍 GEO INIT ON GO ONLINE
+      // =============================
+      if (driver?.currentLocation?.coordinates) {
+        const [lng, lat] = driver.currentLocation.coordinates;
+
+        await updateDriverLocation(driverId, lat, lng).catch(() => {});
+        console.log("📍 GEO INIT (ONLINE):", driverId);
+      }
 
       console.log("🟢 DRIVER ONLINE:", driverId);
     } catch (err) {
@@ -300,21 +379,39 @@ export default function registerDriverHandlers(socket) {
   // =============================
   socket.on("driver-go-offline", async (driverId) => {
     try {
+      const driver = await Driver.findById(driverId);
+
       await Driver.findByIdAndUpdate(driverId, {
         isOnline: false,
         driverState: "offline",
-        currentRide: null,
-      });
+      }).catch(() => {});
 
-      await removeHeartbeat(driverId)
+      // 🔥 TRIGGER RECOVERY IF RIDE EXISTS
+      if (driver?.currentRide) {
+        const ride = await Ride.findById(driver.currentRide);
+
+        if (ride && ["accepted", "arrived"].includes(ride.status)) {
+          console.log("🚨 Triggering recovery from socket offline");
+
+          const { scheduleRecovery } =
+            await import("../modules/recovery/recovery.manager.js");
+
+          scheduleRecovery({
+            rideId: ride._id.toString(),
+            driverId,
+            etaMinutes: ride.estimatedETA || 2,
+          });
+        }
+      }
+
+      await removeHeartbeat(driverId);
       activeDrivers.delete(driverId);
       driverLastLocations.delete(driverId);
 
       driverLastDBUpdate.delete(driverId);
 
       onlineDrivers.delete(driverId);
-      await removeDriverState(driverId);
-      await removeDriver(driverId);
+      await removeDriverState(driverId).catch(() => {});
 
       console.log("🔴 DRIVER OFFLINE:", driverId);
     } catch (err) {

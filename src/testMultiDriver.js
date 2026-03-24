@@ -1,66 +1,80 @@
-// /src/testMultiDriver.js
-
 import { io } from "socket.io-client";
 import readline from "readline";
 import { banner } from "./utils/rideLogger.js";
 
 const SERVER_URL = "http://127.0.0.1:5000";
 
-// =============================
-// 🧠 DRIVER CONFIG
-// =============================
+// =====================================================
+// 🧠 DRIVER CONFIG (KEEP YOUR REAL IDS)
+// =====================================================
 const drivers = [
   { id: "69aa2faa533f56d3c03a51c5", lat: 18.4343, lng: 73.1318 },
   { id: "69aa3ea187d08041a30facbe", lat: 18.4347, lng: 73.1321 },
   { id: "69aa3e5a62b90992de87d183", lat: 18.4341, lng: 73.1324 },
-  { id: "69aa3e04646cdafc63e2a685", lat: 18.435, lng: 73.1312 },
-  { id: "69aa3dc704e15420009c3f91", lat: 18.4353, lng: 73.1325 },
-  { id: "69c0ce9f33bcabb2239bfd50", lat: 18.4353, lng: 73.1325 },
-  { id: "69c0cedb33bcabb2239bfd5f", lat: 18.4353, lng: 73.1325 },
-  { id: "69c0cefc33bcabb2239bfd6c", lat: 18.4353, lng: 73.1325 },
-  { id: "69c0d003c3d790155f5f3429", lat: 18.4353, lng: 73.1325 },
-  { id: "69c0d0332a8fed0f15a1498d", lat: 18.4353, lng: 73.1325 },
 ];
 
-banner("MULTI DRIVER INTERACTIVE TEST");
+// =====================================================
+// ⚙️ MODES
+// =====================================================
+const MODE = {
+  RACE: false, // multiple accept attempts
+  STRESS: true, // auto behavior
+};
 
-const RACE_MODE = true; // 🔥 toggle this
-
-// =============================
-// 🧠 SOCKET STORAGE
-// =============================
+// =====================================================
+// 🧠 STATE STORE
+// =====================================================
 const sockets = new Map();
-const activeRides = new Map();
+const driverState = new Map(); // driverId → state
+const activeRide = new Map(); // driverId → rideId
 
-// =============================
-// 🎮 READLINE SETUP
-// =============================
+// =====================================================
+// 🎮 CLI
+// =====================================================
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
 });
 
-// =============================
-// 🚗 CONNECT DRIVERS
-// =============================
-drivers.forEach((driver) => {
-  const socket = io(SERVER_URL, {
-    transports: ["websocket"],
+banner("🚀 MULTI DRIVER TEST (PRO)");
+
+// =====================================================
+// 🧠 DEBUG LOGGER
+// =====================================================
+function debug(driverId, label, extra = {}) {
+  console.log(`\n🧠 [${label}]`);
+  console.log("👤 Driver:", driverId);
+  console.log("📊 State:", driverState.get(driverId));
+  console.log("🚕 Ride:", activeRide.get(driverId) || "NONE");
+
+  Object.entries(extra).forEach(([k, v]) => {
+    console.log(`👉 ${k}:`, v);
   });
+}
+
+// =====================================================
+// 🚗 CONNECT ALL DRIVERS
+// =====================================================
+drivers.forEach((driver) => {
+  const socket = io(SERVER_URL, { transports: ["websocket"] });
 
   sockets.set(driver.id, socket);
+  driverState.set(driver.id, "IDLE");
 
   socket.on("connect", () => {
-    console.log(`\n🟢 DRIVER ONLINE → ${driver.id}`);
+    console.log(`\n🟢 CONNECTED → ${driver.id}`);
 
     socket.emit("register-driver", driver.id);
+
+    driverState.set(driver.id, "SEARCHING");
 
     // 💓 HEARTBEAT
     setInterval(() => {
       socket.emit("driver-heartbeat", driver.id);
+      console.log(`💓 ${driver.id} → ${driverState.get(driver.id)}`);
     }, 5000);
 
-    // 📍 GPS
+    // 📍 GPS LOOP
     setInterval(() => {
       driver.lat += (Math.random() - 0.5) * 0.0002;
       driver.lng += (Math.random() - 0.5) * 0.0002;
@@ -73,146 +87,215 @@ drivers.forEach((driver) => {
     }, 3000);
   });
 
-  // =============================
-  // 🚦 NEW RIDE EVENT
-  // =============================
+  // =====================================================
+  // 🚦 NEW RIDE
+  // =====================================================
   socket.on("new-ride", (ride) => {
-    console.log(`\n📩 DRIVER ${driver.id} RECEIVED RIDE → ${ride._id}`);
+    console.log(`\n📩 ${driver.id} → NEW RIDE ${ride._id}`);
 
-    activeRides.set(driver.id, ride._id);
+    activeRide.set(driver.id, ride._id);
+    driverState.set(driver.id, "REQUESTED");
+
+    debug(driver.id, "NEW_RIDE");
 
     // =============================
-    // 🔥 RACE CONDITION MODE
+    // ⚡ RACE MODE
     // =============================
-    if (RACE_MODE) {
-      console.log(`⚡ RACE MODE → ${driver.id} attempting instant accept`);
-
-      // 💥 MULTIPLE PARALLEL ACCEPTS
+    if (MODE.RACE) {
       for (let i = 0; i < 3; i++) {
-        setTimeout(() => {
-          socket.emit("accept-ride", {
-            rideId: ride._id,
-            driverId: driver.id,
-          });
-        }, 0);
+        socket.emit("accept-ride", {
+          rideId: ride._id,
+          driverId: driver.id,
+        });
       }
-
       return;
     }
 
-    // 👉 Manual mode fallback
-    if (!RACE_MODE) showControls();
+    // =============================
+    // 🔥 STRESS MODE (SMART)
+    // =============================
+    if (MODE.STRESS) {
+      const delay = Math.random() * 2000;
+
+      setTimeout(() => {
+        console.log(`⚡ ${driver.id} trying accept after ${delay}ms`);
+
+        socket.emit("accept-ride", {
+          rideId: ride._id,
+          driverId: driver.id,
+        });
+      }, delay);
+    }
   });
 
-  // =============================
-  // 🏆 WINNER
-  // =============================
+  // =====================================================
+  // 🏆 ACCEPT SUCCESS
+  // =====================================================
   socket.on("ride-accepted-success", (ride) => {
-    console.log(`\n🏆 DRIVER ${driver.id} WON RIDE ${ride._id}`);
+    console.log(`🏆 WINNER → ${driver.id}`);
+
+    driverState.set(driver.id, "TO_PICKUP");
+    activeRide.set(driver.id, ride._id);
+
+    debug(driver.id, "ACCEPT_SUCCESS");
+
+    // 🔥 STRESS AUTO FLOW
+    if (MODE.STRESS) {
+      setTimeout(() => {
+        socket.emit("arrive-ride", {
+          rideId: ride._id,
+          driverId: driver.id,
+        });
+      }, 2000);
+    }
   });
 
-  // =============================
-  // ❌ LOST
-  // =============================
   socket.on("ride-taken", (rideId) => {
-    console.log(`❌ DRIVER ${driver.id} LOST → ${rideId}`);
+    console.log(`❌ LOST → ${driver.id}`);
+    driverState.set(driver.id, "SEARCHING");
+    activeRide.delete(driver.id);
   });
 
-  socket.on("ride-error", (msg) => {
-    console.log(`❌ DRIVER ${driver.id} ERROR → ${msg}`);
+  // =====================================================
+  // 📍 ARRIVED
+  // =====================================================
+  socket.on("ride-arrived", (ride) => {
+    driverState.set(driver.id, "ARRIVED");
+
+    debug(driver.id, "ARRIVED");
+
+    if (MODE.STRESS) {
+      setTimeout(() => {
+        socket.emit("start-ride", {
+          rideId: ride._id,
+          driverId: driver.id,
+        });
+      }, 1500);
+    }
   });
 
+  // =====================================================
+  // 🚦 STARTED
+  // =====================================================
+  socket.on("ride-started", (ride) => {
+    driverState.set(driver.id, "ON_TRIP");
+
+    debug(driver.id, "STARTED");
+
+    if (MODE.STRESS) {
+      setTimeout(() => {
+        socket.emit("complete-ride", {
+          rideId: ride._id,
+          driverId: driver.id,
+        });
+      }, 3000);
+    }
+  });
+
+  // =====================================================
+  // 🏁 COMPLETED
+  // =====================================================
   socket.on("ride-completed", (ride) => {
-    console.log(`🏁 DRIVER ${driver.id} COMPLETED → ${ride._id}`);
+    console.log(`🏁 COMPLETED → ${driver.id}`);
+
+    driverState.set(driver.id, "SEARCHING");
+    activeRide.delete(driver.id);
+
+    debug(driver.id, "COMPLETED");
+  });
+
+  // =====================================================
+  // 🔁 RECOVERY
+  // =====================================================
+  socket.on("ride-restored", (data) => {
+    console.log(`🔁 RESTORED → ${driver.id}`);
+
+    activeRide.set(driver.id, data.ride._id);
+
+    const map = {
+      accepted: "TO_PICKUP",
+      arrived: "ARRIVED",
+      ongoing: "ON_TRIP",
+    };
+
+    driverState.set(driver.id, map[data.status] || "SEARCHING");
+
+    debug(driver.id, "RECOVERY", { status: data.status });
+  });
+
+  socket.on("driver-lost", () => {
+    console.log(`⚠️ LOST DRIVER → ${driver.id}`);
+
+    driverState.set(driver.id, "SEARCHING");
+    activeRide.delete(driver.id);
+  });
+
+  socket.on("disconnect", () => {
+    console.log(`🔴 DISCONNECTED → ${driver.id}`);
   });
 });
 
-// =============================
-// 🎮 DRIVER INDEX MAP
-// =============================
-const driverIndexMap = drivers.map((d, i) => ({
-  index: i + 1,
-  id: d.id,
-}));
-
-// =============================
-// 🎮 SHOW CONTROL PANEL
-// =============================
+// =====================================================
+// 🎮 CLI CONTROL PANEL
+// =====================================================
 function showControls() {
   console.log(`
 ==============================
-🎮 CONTROL PANEL
+🎮 MULTI DRIVER CONTROL
 ==============================
 
-Drivers:
-${driverIndexMap.map((d) => `${d.index}. ${d.id}`).join("\n")}
-
-Actions:
-1 → Accept
-2 → Reject
-3 → Arrive
-4 → Start Ride
-5 → Complete Ride
-
-Format:
-<driverIndex> <action>
+Commands:
+accept <driverId>
+arrive <driverId>
+start <driverId>
+complete <driverId>
+disconnect <driverId>
 
 Example:
-1 1   → Driver 1 Accept
-2 5   → Driver 2 Complete Ride
+accept 69aa2faa533f56d3c03a51c5
 
 ==============================
 `);
 }
 
-// =============================
-// 🎮 INPUT HANDLER
-// =============================
+showControls();
+
+// =====================================================
+// 🎮 CLI INPUT
+// =====================================================
 rl.on("line", (input) => {
-  const [driverIndex, action] = input.trim().split(" ").map(Number);
+  const [action, driverId] = input.trim().split(" ");
 
-  const driver = driverIndexMap.find((d) => d.index === driverIndex);
+  const socket = sockets.get(driverId);
+  const rideId = activeRide.get(driverId);
 
-  if (!driver) {
-    console.log("❌ Invalid driver index");
-    return;
-  }
+  if (!socket) return console.log("❌ Driver not found");
+  if (!rideId) return console.log("❌ No active ride");
 
-  const socket = sockets.get(driver.id);
-  const rideId = activeRides.get(driver.id);
-
-  if (!socket || !rideId) {
-    console.log("❌ No active ride for this driver");
-    return;
-  }
+  debug(driverId, "CLI_ACTION", { action });
 
   switch (action) {
-    case 1:
-      console.log(`✅ ACCEPT → ${driver.id}`);
-      socket.emit("accept-ride", { rideId, driverId: driver.id });
+    case "accept":
+      socket.emit("accept-ride", { rideId, driverId });
       break;
 
-    case 2:
-      console.log(`🚫 REJECT → ${driver.id}`);
-      socket.emit("cancel-ride-driver", { rideId, driverId: driver.id });
+    case "arrive":
+      socket.emit("arrive-ride", { rideId, driverId });
       break;
 
-    case 3:
-      console.log(`📍 ARRIVE → ${driver.id}`);
-      socket.emit("arrive-ride", { rideId, driverId: driver.id });
+    case "start":
+      socket.emit("start-ride", { rideId, driverId });
       break;
 
-    case 4:
-      console.log(`🚦 START → ${driver.id}`);
-      socket.emit("start-ride", { rideId, driverId: driver.id });
+    case "complete":
+      socket.emit("complete-ride", { rideId, driverId });
       break;
 
-    case 5:
-      console.log(`🏁 COMPLETE → ${driver.id}`);
-      socket.emit("complete-ride", { rideId, driverId: driver.id });
+    case "disconnect":
+      socket.disconnect();
       break;
 
     default:
-      console.log("❌ Invalid action");
+      console.log("❌ Invalid command");
   }
 });

@@ -4,14 +4,14 @@ import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
-import {
-  setAccepted,
-  getDispatch,
-} from "../../modules/dispatch/dispatch.redis.js";
+import { setAccepted } from "../../modules/dispatch/dispatch.redis.js";
 import {
   getDriverState,
   setDriverState,
 } from "../../modules/driverState/driverState.redis.js";
+import { isRedisHealthy } from "../../config/redis.js";
+import { getIO,onlineCustomers } from "../../socket/index.js";
+import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
 
 export async function acceptRideService({ rideId, driverId }) {
   throttledLog(
@@ -38,7 +38,11 @@ export async function acceptRideService({ rideId, driverId }) {
     throw new Error("Driver connection unstable");
   }
 
-  const state = await getDriverState(driverId);
+  let state = await getDriverState(driverId);
+
+  if (!state) {
+    state = driver.driverState; // Mongo fallback
+  }
 
   if (state === "to_pickup" || state === "on_trip") {
     throw new Error("Driver already on ride");
@@ -51,31 +55,64 @@ export async function acceptRideService({ rideId, driverId }) {
   // =====================================================
   // 🔥 1️⃣ REDIS LOCK CHECK (FAST EXIT)
   // =====================================================
-  const locked = await setAccepted(rideId, driverId);
+  let locked = false;
 
-  if (!locked) {
-    throw new Error("Ride already taken");
+  // =============================
+  // 🔥 PRIMARY: REDIS LOCK
+  // =============================
+  if (isRedisHealthy()) {
+    locked = await setAccepted(rideId, driverId);
   }
 
-  // =====================================================
-  // 🧾 4️⃣ UPDATE RIDE (NO TRANSACTION)
-  // =====================================================
-  const ride = await Ride.findOneAndUpdate(
-    {
-      _id: rideId,
-      status: "requested",
-    },
-    {
-      $set: {
-        status: "accepted",
-        driver: driverId,
-      },
-    },
-    { returnDocument: "after" },
-  );
+  // =============================
+  // 🛟 FALLBACK: DB LOCK
+  // =============================
+  let ride;
 
-  if (!ride) {
-    throw new Error("Ride already accepted");
+  if (!locked) {
+    console.log("🛟 FALLBACK → ATOMIC DB LOCK");
+
+    // 🔥 atomic claim
+    ride = await Ride.findOneAndUpdate(
+      {
+        _id: rideId,
+        status: "requested",
+      },
+      {
+        $set: {
+          status: "accepted",
+          driver: driverId,
+          recovery: null,
+        },
+      },
+      { returnDocument: "after" },
+    );
+
+    if (!ride) {
+      throw new Error("Ride already taken");
+    }
+  } else {
+    // =====================================================
+    // NORMAL FLOW AFTER REDIS LOCK
+    // =====================================================
+    ride = await Ride.findOneAndUpdate(
+      {
+        _id: rideId,
+        status: "requested",
+      },
+      {
+        $set: {
+          status: "accepted",
+          driver: driverId,
+          recovery: null, // 🔥 CLEAR RECOVERY
+        },
+      },
+      { returnDocument: "after" },
+    );
+
+    if (!ride) {
+      throw new Error("Ride already accepted");
+    }
   }
 
   // =====================================================
@@ -88,7 +125,25 @@ export async function acceptRideService({ rideId, driverId }) {
     },
   });
 
-  await setDriverState(driverId, "to_pickup");
+  await setDriverState(driverId, "to_pickup").catch(() => {});
+
+  // =============================
+  // 🔥 CANCEL RECOVERY
+  // =============================
+  cancelRecovery(driverId);
+
+  // =============================
+  // 📣 NOTIFY CUSTOMER
+  // =============================
+  const io = getIO();
+  const socketId = onlineCustomers.get(ride.customer.toString());
+
+  if (io && socketId) {
+    io.to(socketId).emit("ride-accepted", {
+      rideId,
+      driverId,
+    });
+  }
 
   // =====================================================
   // ✅ SUCCESS

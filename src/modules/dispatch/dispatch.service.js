@@ -22,6 +22,18 @@ export async function startDispatch(rideId) {
   console.log("🚀 DISPATCH STARTED");
   console.log("Ride:", rideId);
   console.log("==============================\n");
+
+  const ride = await Ride.findById(rideId);
+
+  if (ride.status !== "requested") {
+    console.log("🛑 Ride already handled → stopping dispatch");
+    return;
+  }
+
+  if (ride.recovery) {
+    console.log("🧠 Starting dispatch in recovery mode");
+  }
+
   const rideKey = rideId.toString();
 
   await initDispatch(rideKey);
@@ -53,19 +65,49 @@ async function runDispatch(rideId, context) {
       return;
     }
 
+    // ✅ ONLY THIS MATTERS
     if (ride.status !== "requested") {
-      console.log(`🛑 Ride already handled → status=${ride.status}`);
+      console.log("🛑 Dispatch stopped → ride already handled:", ride.status);
       return;
     }
 
-    const MAX_ATTEMPTS = BATCHES.length + 2; // extra retries
+    // =============================
+    // 🧠 RECOVERY MODE
+    // =============================
+    const isRecovery = !!ride.recovery;
+    const recoveryAttempts = ride.recovery?.attempts || 0;
 
-    if (context.attempt >= MAX_ATTEMPTS) {
-      await cancelRide(ride);
-      return;
+    if (isRecovery) {
+      console.log("🧠 RECOVERY MODE (attempt:", recoveryAttempts, ")");
     }
 
-    const batchSize = BATCHES[Math.min(context.attempt, BATCHES.length - 1)];
+    // =============================
+    // LIMIT ATTEMPTS
+    // =============================
+    let maxAttempts = BATCHES.length + 2;
+
+    if (isRecovery) {
+      maxAttempts = 2; // fast failure
+    }
+
+    if (context.attempt >= maxAttempts) {
+      return cancelRide(ride);
+    }
+
+    // =============================
+    // BATCH SIZE
+    // =============================
+    let batchSize = BATCHES[Math.min(context.attempt, BATCHES.length - 1)];
+
+    if (isRecovery) {
+      batchSize = Math.max(batchSize, 5);
+    }
+
+    // ✅ RECOVERY MODE → AGGRESSIVE BROADCAST
+    if (ride.recovery) {
+      batchSize = Math.max(batchSize, 5);
+    }
+
     console.log("📦 Batch size:", batchSize);
 
     // =====================================================
@@ -77,6 +119,10 @@ async function runDispatch(rideId, context) {
       rideId: rideId.toString(), // 🔥 CRITICAL FIX
     });
 
+    if (!driverIds.length) {
+      console.log("❌ No drivers found");
+    }
+
     console.log("📊 Total drivers found:", driverIds.length);
 
     const io = getIO();
@@ -85,107 +131,61 @@ async function runDispatch(rideId, context) {
       return setTimeout(() => runDispatch(rideId, context), 2000);
     }
 
-    let sent = 0;
-
-    console.log("🧠 Eligible drivers (before filtering):", driverIds.length);
-
-    // =====================================================
-    // 📡 DISPATCH TO DRIVERS
-    // =====================================================
     const rideKey = rideId.toString();
 
     // 🔁 Rotation (refresh every 2 attempts only)
     const rotationMap =
       context.attempt % 2 === 0 ? await getRotation(rideKey) : {};
 
+    console.log("🧠 Eligible drivers (before filtering):", driverIds.length);
+
     // =====================================================
     // 📡 DISPATCH LOOP (REDIS-FIRST, RACE SAFE)
     // =====================================================
     let state = await getDispatch(rideKey);
+    let sent = 0;
 
     for (const driverId of driverIds) {
       // 🔥 ALWAYS re-check Redis state (race safety)
       state = await getDispatch(rideKey);
 
-      if (state.acceptedDriver) {
-        console.log(
-          "🛑 Dispatch stopped → driver accepted:",
-          state.acceptedDriver,
-        );
-        return;
+      // =============================
+      // SKIP OFFLINE
+      // =============================
+      const socketId = onlineDrivers.get(driverId);
+
+      // skip only if NO socket AND NOT recovery
+      if (!socketId && !isRecovery) continue;
+
+      // =============================
+      // ❌ PREVENT SAME DRIVER AFTER RECOVERY
+      // =============================
+      const originalDriverId = ride.recovery?.originalDriverId;
+
+      if (isRecovery && driverId === originalDriverId) {
+        continue;
       }
 
-      // =====================================================
-      // ❌ SKIP OFFLINE SOCKET (TEMP - can move to Redis later)
-      // =====================================================
-      if (!onlineDrivers.has(driverId)) continue;
-
-      // =====================================================
-      // 🔄 DRIVER ROTATION (ANTI-SPAM)
-      // =====================================================
+      // =============================
+      // ROTATION
+      // =============================
       const lastRotation = rotationMap[driverId];
-
-      const ROTATION_COOLDOWN = 15000;
-
-      if (lastRotation) {
-        if (Date.now() - Number(lastRotation) < ROTATION_COOLDOWN) {
-          console.log(`🔄 Rotation skip: ${driverId}`);
-          continue;
-        }
+      if (lastRotation && Date.now() - Number(lastRotation) < 15000) {
+        continue;
       }
 
-      // =====================================================
-      // ❌ REJECTION LOGIC (2 CHANCES SYSTEM)
-      // =====================================================
+      // =============================
+      // REJECTION LOGIC
+      // =============================
       const rejectData = state.rejectedDrivers[driverId];
 
       if (rejectData) {
-        let parsed;
-
         try {
-          parsed = JSON.parse(rejectData);
-        } catch {
-          parsed = null;
-        }
+          const { time, count } = JSON.parse(rejectData);
 
-        if (parsed) {
-          const { time, count } = parsed;
-
-          // ❌ HARD BLOCK AFTER 2 REJECTIONS
-          const BLOCK_TIME = 30000; // 30 sec
-
-          if (count >= 2) {
-            if (Date.now() - time < BLOCK_TIME) {
-              console.log(`🚫 Temp blocked (2 rejects): ${driverId}`);
-              continue;
-            } else {
-              console.log(`♻️ Resetting reject penalty: ${driverId}`);
-
-              // 🔥 CRITICAL FIX → RESET IN REDIS
-              const redis = (await import("../../config/redis.js")).default;
-
-              await redis.hSet(
-                `dispatch:${rideKey}:rejected`,
-                driverId,
-                JSON.stringify({
-                  count: 0,
-                  time: Date.now(),
-                }),
-              );
-
-              // also update local state
-              delete state.rejectedDrivers[driverId];
-            }
-          }
-
-          // ⏳ SMALL TOWN COOLDOWN (SHORT)
-          const COOLDOWN = 8000; // 8 sec
-
-          if (Date.now() - time < COOLDOWN) {
-            console.log(`⏳ Cooldown (${count}/2): ${driverId}`);
-            continue;
-          }
-        }
+          if (count >= 2 && Date.now() - time < 30000) continue;
+          if (Date.now() - time < 8000) continue;
+        } catch {}
       }
 
       // =====================================================
@@ -218,14 +218,17 @@ async function runDispatch(rideId, context) {
       // =====================================================
       // 📡 SEND RIDE REQUEST
       // =====================================================
-      const socketId = onlineDrivers.get(driverId);
-      if (!socketId) continue;
-
       console.log(`📡 Dispatch → ${driverId}`);
+
+      if (!socketId) {
+        console.log(`⚠️ Driver ${driverId} offline → skipping emit`);
+        continue;
+      }
 
       io.to(socketId).emit("new-ride", {
         ...(ride.toObject ? ride.toObject() : ride),
         dispatchAttempt: context.attempt + 1,
+        isRecovery,
       });
 
       await markDriverNotified(rideKey, driverId);
@@ -249,7 +252,9 @@ async function runDispatch(rideId, context) {
     // =====================================================
     const latestRide = await Ride.findById(rideId);
 
-    if (!latestRide || latestRide.status !== "requested") {
+    if (!latestRide) return;
+
+    if (latestRide.status !== "requested") {
       console.log("🛑 Not scheduling next retry (ride already handled)");
       return;
     }
@@ -258,11 +263,15 @@ async function runDispatch(rideId, context) {
     // 🔥 SMART DELAY LOGIC
     // =====================================================
 
-    const nextDelay =
+    let nextDelay =
       sent === 0
-        ? 15000 // no drivers → slow retry
+        ? 15000
         : RETRY_DELAYS[Math.min(context.attempt, RETRY_DELAYS.length - 1)];
 
+    // ✅ RECOVERY MODE → FASTER RETRY
+    if (isRecovery) {
+      nextDelay = 5000;
+    }
     console.log(`⏳ Next retry in ${nextDelay / 1000}s`);
 
     setTimeout(() => {

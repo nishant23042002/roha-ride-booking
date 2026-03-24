@@ -1,94 +1,101 @@
 import redis from "../../config/redis.js";
 import { safeRedis } from "../geo/geo.redis.js";
 
-const PREFIX = "dispatch:";
-const TTL_SECONDS = 120; // ⏱️ 2 min (safe for dispatch lifecycle)
-const ROTATION_SUFFIX = ":rotation";
-const NOTIFIED_SUFFIX = ":notified";
+const PREFIX = "dispatch:ride:";
+const TTL = 300;
 
 // =============================
-// 🔄 MARK DRIVER NOTIFIED (COUNT + TIME)
+// 🧠 KEY HELPERS
 // =============================
-export async function markDriverNotified(rideId, driverId) {
-  const rotationKey = PREFIX + rideId + ROTATION_SUFFIX;
-  const notifiedKey = PREFIX + rideId + NOTIFIED_SUFFIX;
+const base = (rideId) => `${PREFIX}${rideId}:meta`;
+const lockKey = (rideId) => `${PREFIX}${rideId}:lock`;
+const notifiedKey = (rideId) => `${PREFIX}${rideId}:notified`;
+const rotationKey = (rideId) => `${PREFIX}${rideId}:rotation`;
+const rejectedKey = (rideId) => `${PREFIX}${rideId}:rejected`;
 
-  // 🔁 Rotation (timestamp)
+const touchTTL = async (rideId) => {
+  await safeRedis(() => redis.expire(base(rideId), TTL), "TTL_BASE");
+};
+
+// =============================
+// 🚀 INIT DISPATCH
+// =============================
+export async function initDispatch(rideId) {
   await safeRedis(
-    () => redis.hSet(rotationKey, driverId, Date.now()),
-    "MARK_ROTATION",
+    () =>
+      redis.set(base(rideId), "active", {
+        NX: true,
+        EX: TTL,
+      }),
+    "INIT_DISPATCH",
   );
 
-  await safeRedis(
-    () => redis.hIncrBy(notifiedKey, driverId, 1),
-    "INCR_NOTIFY_COUNT",
-  );
-
-  // TTL
-  await safeRedis(() => redis.expire(rotationKey, TTL_SECONDS), "TTL_ROTATION");
-  await safeRedis(() => redis.expire(notifiedKey, TTL_SECONDS), "TTL_NOTIFY");
+  console.log("🧠 Dispatch INIT:", rideId);
 }
 
 // =============================
-// 📥 GET ROTATION DATA
+// 🔄 MARK DRIVER NOTIFIED
+// =============================
+export async function markDriverNotified(rideId, driverId) {
+  await safeRedis(
+    () => redis.hSet(rotationKey(rideId), driverId, Date.now()),
+    "ROTATION_SET",
+  );
+
+  await safeRedis(
+    () => redis.hIncrBy(notifiedKey(rideId), driverId, 1),
+    "NOTIFIED_INCREMENT",
+  );
+
+  await safeRedis(() => redis.expire(rotationKey(rideId), TTL), "TTL_ROTATION");
+
+  await safeRedis(() => redis.expire(notifiedKey(rideId), TTL), "TTL_NOTIFIED");
+
+  await touchTTL(rideId);
+}
+
+// =============================
+// 📥 GET ROTATION
 // =============================
 export async function getRotation(rideId) {
-  const key = PREFIX + rideId + ROTATION_SUFFIX;
-
-  const data = await safeRedis(() => redis.hGetAll(key), "GET_ROTATION");
+  const data = await safeRedis(
+    () => redis.hGetAll(rotationKey(rideId)),
+    "GET_ROTATION",
+  );
 
   return data || {};
 }
 
 // =============================
-// 🚀 INIT
-// =============================
-export async function initDispatch(rideId) {
-  const key = PREFIX + rideId;
-  const rejectedKey = key + ":rejected";
-
-  // ✅ Also prepare rejected key TTL (empty for now)
-  await safeRedis(
-    () => redis.expire(rejectedKey, TTL_SECONDS),
-    "SET_TTL_REJECTED",
-  );
-
-  console.log("🧠 Redis Dispatch INIT:", rideId);
-}
-
-// =============================
-// ✅ SET ACCEPTED
+// ✅ LOCK (FIRST DRIVER WINS)
 // =============================
 export async function setAccepted(rideId, driverId) {
-  const key = PREFIX + rideId + ":lock";
-
   const result = await safeRedis(
     () =>
-      redis.set(key, driverId, {
-        NX: true, // 🔥 only first wins
-        EX: TTL_SECONDS,
+      redis.set(lockKey(rideId), driverId, {
+        NX: true,
+        EX: TTL,
       }),
-    "SETNX_ACCEPT",
+    "SET_LOCK",
   );
 
-  if (!result) {
-    return false; // ❌ already locked
-  }
+  await touchTTL(rideId);
+
+  if (!result) return false;
 
   console.log("✅ LOCK ACQUIRED:", rideId, driverId);
-  return true; // ✅ winner
+  return true;
 }
 
 // =============================
-// ❌ ADD REJECTED (UPGRADED)
+// ❌ ADD REJECTED DRIVER
 // =============================
 export async function addRejected(rideId, driverId) {
-  const key = PREFIX + rideId + ":rejected";
+  const key = rejectedKey(rideId);
 
-  // 👉 get existing data
   const existing = await safeRedis(
     () => redis.hGet(key, driverId),
-    "GET_REJECTED_DRIVER",
+    "GET_REJECTED",
   );
 
   let count = 1;
@@ -97,63 +104,71 @@ export async function addRejected(rideId, driverId) {
     try {
       const parsed = JSON.parse(existing);
       count = (parsed.count || 0) + 1;
-    } catch {
-      count = 1;
-    }
+    } catch {}
   }
 
   const payload = JSON.stringify({
-    time: Date.now(),
     count,
+    time: Date.now(),
   });
 
-  await safeRedis(() => redis.hSet(key, driverId, payload), "ADD_REJECTED");
+  await safeRedis(() => redis.hSet(key, driverId, payload), "SET_REJECTED");
 
-  const ttl = await safeRedis(() => redis.ttl(key), "GET_TTL");
+  await safeRedis(() => redis.expire(key, TTL), "TTL_REJECTED");
 
-  if (ttl < 0) {
-    await safeRedis(() => redis.expire(key, TTL_SECONDS), "SET_TTL_REJECTED");
-  }
+  await touchTTL(rideId);
 
-  console.log(`🚫 Rejected: ${driverId} (count=${count})`);
+  console.log(`🚫 Rejected → ${driverId} (count=${count})`);
 }
 
 // =============================
-// 📥 GET STATE
+// 📥 GET DISPATCH STATE
 // =============================
 export async function getDispatch(rideId) {
-  const key = PREFIX + rideId;
-  const rejectedKey = key + ":rejected";
-  const notifiedKey = key + NOTIFIED_SUFFIX;
-
   const [rejectedRaw, notifiedRaw] = await Promise.all([
-    safeRedis(() => redis.hGetAll(rejectedKey), "GET_REJECTED"),
-    safeRedis(() => redis.hGetAll(notifiedKey), "GET_NOTIFIED"),
+    safeRedis(() => redis.hGetAll(rejectedKey(rideId)), "GET_REJECTED_ALL"),
+    safeRedis(() => redis.hGetAll(notifiedKey(rideId)), "GET_NOTIFIED_ALL"),
   ]);
 
   return {
     rejectedDrivers: rejectedRaw || {},
-    notifiedDrivers: notifiedRaw || {}, // ✅ CRITICAL FIX
+    notifiedDrivers: notifiedRaw || {},
   };
 }
 
 // =============================
-// 🧹 CLEAR
+// 🔍 CHECK DISPATCH ACTIVE
+// =============================
+export async function isDispatchRunning(rideId) {
+  const keys = [
+    base(rideId),
+    lockKey(rideId),
+    rotationKey(rideId),
+    notifiedKey(rideId),
+  ];
+
+  const results = await Promise.all(
+    keys.map((k) => safeRedis(() => redis.exists(k), "CHECK_KEY")),
+  );
+
+  return results.some((r) => r === 1);
+}
+
+// =============================
+// 🧹 CLEAR DISPATCH
 // =============================
 export async function clearDispatch(rideId) {
-  const key = PREFIX + rideId;
-
   await safeRedis(
     () =>
       redis.del(
-        key,
-        key + ":rejected",
-        key + ":rotation",
-        key + NOTIFIED_SUFFIX,
-        key + ":lock"
+        base(rideId),
+        lockKey(rideId),
+        rotationKey(rideId),
+        notifiedKey(rideId),
+        rejectedKey(rideId),
       ),
     "CLEAR_DISPATCH",
   );
 
-  console.log("🧹 Redis Dispatch Cleared:", rideId);
+  console.log("🧹 Dispatch cleared:", rideId);
 }

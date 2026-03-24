@@ -14,7 +14,7 @@ export function calculateDriverETA(driver, pickupLat, pickupLng) {
     return null;
   }
 
-  const speed = 25; // small town realistic
+  const speed = 45; // small town realistic
 
   const etaMinutes = (distance / speed) * 60;
 

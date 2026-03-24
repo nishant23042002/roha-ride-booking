@@ -13,11 +13,24 @@ export async function changeDriverState({
     driverState: newState,
   };
 
+  // =============================
+  // 🎯 STATE → ONLINE SYNC
+  // =============================
+  if (newState === "offline") {
+    update.isOnline = false;
+    update.currentRide = null;
+  } else {
+    update.isOnline = true;
+  }
+
+  // =============================
+  // 🚕 RIDE SYNC
+  // =============================
   if (rideId !== null) {
     update.currentRide = rideId;
   }
 
-  if (newState === "searching" || newState === "offline") {
+  if (newState === "searching") {
     update.currentRide = null;
   }
 
@@ -34,9 +47,13 @@ export async function changeDriverState({
     throw new Error("Driver not found");
   }
 
-  // 🔥 ADD THIS BLOCK
+  // 🔥 Redis sync (non-blocking safe)
   if (!session) {
-    await setDriverState(driverId.toString(), newState);
+    try {
+      await setDriverState(driverId.toString(), newState);
+    } catch (err) {
+      console.log("⚠️ Redis state update failed:", err.message);
+    }
   }
 
   console.log(`[DRIVER_STATE] driver=${driverId} → ${newState}`);

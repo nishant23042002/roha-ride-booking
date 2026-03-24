@@ -7,6 +7,26 @@ import axios from "axios";
 import polyline from "@mapbox/polyline";
 import readline from "readline";
 
+// =====================================================
+// 🧠 DEBUG LOGGER (UPGRADED)
+// =====================================================
+function debug(label, data = {}) {
+  console.log(`\n🧠 [${label}]`);
+  console.log("⏱", new Date().toISOString());
+  console.log("📊 State:", state);
+  console.log("🌐 Online:", isOnline);
+
+  if (currentRide) {
+    console.log("🚕 Ride:", currentRide._id);
+  } else {
+    console.log("🚕 Ride: NONE");
+  }
+
+  Object.entries(data).forEach(([k, v]) => {
+    console.log(`👉 ${k}:`, v);
+  });
+}
+
 const rl = readline.createInterface({
   input: process.stdin,
   output: process.stdout,
@@ -33,6 +53,7 @@ let gpsInterval = null;
 let state = "IDLE";
 let isOnline = false;
 let lastSent = 0;
+let hasConnectedOnce = false;
 
 function showMenu() {
   console.log(`
@@ -50,20 +71,24 @@ function showMenu() {
 `);
 }
 
-// ---------------- CLI HANDLER ----------------
+// =====================================================
+// 🎯 CLI HANDLER (UPGRADED)
+// =====================================================
 
 rl.on("line", (input) => {
   const command = input.trim();
 
-  if (!/^[1-8]$/.test(command)) {
-    console.log("❓ Invalid input");
-    showMenu();
-    return;
-  }
+  console.log(`\n⚡ ACTION → ${command}`);
+
+  debug("CLI_ACTION", {
+    command,
+    state,
+    hasRide: !!currentRide,
+  });
+
   switch (command) {
     case "1":
       if (!isOnline) {
-        socket.emit("register-driver", DRIVER_ID); // 🔥 IMPORTANT
         socket.emit("driver-go-online", DRIVER_ID);
 
         console.log("🟢 Driver ONLINE");
@@ -78,15 +103,8 @@ rl.on("line", (input) => {
         console.log("🔴 Driver OFFLINE");
         isOnline = false;
 
-        if (gpsInterval) {
-          clearInterval(gpsInterval);
-          gpsInterval = null;
-        }
-
-        if (heartbeatInterval) {
-          clearInterval(heartbeatInterval);
-          heartbeatInterval = null;
-        }
+        clearInterval(gpsInterval);
+        clearInterval(heartbeatInterval);
       }
       break;
 
@@ -123,7 +141,7 @@ rl.on("line", (input) => {
     case "5":
       if (!currentRide) return console.log("❌ No active ride");
       if (state !== "ARRIVED") {
-        return console.log("❌ Cannot start before arrival");
+        return console.log("❌ Not arrived yet");
       }
       socket.emit("start-ride", {
         rideId: currentRide._id,
@@ -134,7 +152,7 @@ rl.on("line", (input) => {
     case "6":
       if (!currentRide) return console.log("❌ No active ride");
       if (state !== "ON_TRIP") {
-        return console.log("❌ Cannot complete before starting ride");
+        return console.log("❌ Not started");
       }
       socket.emit("complete-ride", {
         rideId: currentRide._id,
@@ -214,6 +232,8 @@ function startGPS(route, target = null, onArrive = null) {
     currentLocation = { lat, lng };
 
     if (Date.now() - lastSent > 3000) {
+      if (!isOnline) return;
+
       socket.emit("driver-location-update", {
         driverId: DRIVER_ID,
         lat,
@@ -263,47 +283,57 @@ async function startIdleRoaming() {
   });
 }
 
-// ---------------- SOCKET EVENTS ----------------
+// =====================================================
+// 🚕 Socket Events
+// =====================================================
 socket.on("connect", () => {
-  console.log("\n===============================");
-  banner("DRIVER SIMULATOR STARTED");
-  console.log("Socket:", socket.id);
+  banner("SOCKET CONNECT");
+
+  debug("SOCKET_CONNECT", {
+    socketId: socket.id,
+    reconnect: hasConnectedOnce,
+  });
+
+  if (hasConnectedOnce) {
+    console.log("🔁 RECONNECTED");
+  } else {
+    console.log("🟢 FIRST CONNECT");
+    hasConnectedOnce = true;
+  }
   console.log("===============================\n");
 
   socket.emit("register-driver", DRIVER_ID);
-
-  updateState("ONLINE");
-
-  socket.emit("driver-go-online", DRIVER_ID);
-
-  // ✅ STEP 2: wait a bit (important)
-  setTimeout(() => {
-    startIdleRoaming(); // GPS starts AFTER registration
-  }, 1000);
-
+  isOnline = true;
   updateState("SEARCHING");
 
   if (!heartbeatInterval) {
     heartbeatInterval = setInterval(() => {
       socket.emit("driver-heartbeat", DRIVER_ID);
-      console.log("💓 Heartbeat sent");
-    }, 10000);
+      console.log(`💓 HB → ${state}`);
+    }, 5000);
   }
 
-  console.log("\n🛰 Driver roaming in idle mode\n");
+  setTimeout(() => {
+    if (isOnline) {
+      startIdleRoaming();
+    }
+  }, 1000);
 });
 
+// =====================================================
+// 🚕 RIDE FLOW EVENTS
+// =====================================================
 socket.on("new-ride", async (ride) => {
   if (gpsInterval) clearInterval(gpsInterval);
-  banner("NEW RIDE REQUEST RECEIVED");
+  banner("NEW RIDE");
 
   currentRide = ride;
 
-  console.log("🆔 Ride ID:", ride._id);
-  console.log("👤 Customer:", ride.customer);
-  console.log("🚘 Vehicle:", ride.vehicleType || "N/A");
-  console.log("👥 Passengers:", ride.passengerCount);
-  console.log("📦 Ride Type:", ride.rideType);
+  debug("NEW_RIDE", {
+    rideId: ride._id,
+    fare: ride.estimatedFare,
+    customerCount: ride.passengerCount,
+  });
 
   const pickup = ride.pickupLocation.coordinates;
   const drop = ride.dropLocation.coordinates;
@@ -331,10 +361,12 @@ socket.on("ride-accepted-success", async (ride) => {
   banner("RIDE ACCEPTED");
 
   currentRide = ride;
+
+  debug("ACCEPT_SUCCESS", {
+    rideId: ride._id,
+  });
+
   updateState("TO_PICKUP");
-
-  console.log("🧭 Navigating to pickup location");
-
   const pickup = {
     lat: ride.pickupLocation.coordinates[1],
     lng: ride.pickupLocation.coordinates[0],
@@ -411,8 +443,77 @@ socket.on("ride-completed", (ride) => {
   console.log("\n🚗 Driver returning to idle roaming\n");
 
   console.log("\n🚗 Back to searching...\n");
-  startIdleRoaming();
+  if (isOnline) {
+    startIdleRoaming();
+  }
 });
+
+// =====================================================
+// 🔥 RECOVERY EVENTS (CRITICAL)
+// =====================================================
+socket.on("ride-restored", async (data) => {
+  console.log("\n🔁 RESTORED RIDE RECEIVED");
+
+  // ✅ DIRECTLY USE RIDE (NO API CALL)
+  currentRide = data.ride;
+
+  console.log("🆔 Ride:", currentRide._id);
+
+  const mapped =
+    data.status === "accepted"
+      ? "TO_PICKUP"
+      : data.status === "arrived"
+        ? "ARRIVED"
+        : data.status === "ongoing"
+          ? "ON_TRIP"
+          : "SEARCHING";
+
+  updateState(mapped);
+
+  console.log("🔄 State restored:", mapped);
+
+  // =============================
+  // 🔥 RESUME GPS BASED ON STATE
+  // =============================
+
+  if (mapped === "TO_PICKUP") {
+    const pickup = {
+      lat: currentRide.pickupLocation.coordinates[1],
+      lng: currentRide.pickupLocation.coordinates[0],
+    };
+
+    const route = await getRoute(currentLocation, pickup);
+    startGPS(route, pickup);
+  }
+
+  if (mapped === "ON_TRIP") {
+    const drop = {
+      lat: currentRide.dropLocation.coordinates[1],
+      lng: currentRide.dropLocation.coordinates[0],
+    };
+
+    const route = await getRoute(currentLocation, drop);
+    startGPS(route, drop);
+  }
+});
+
+socket.on("driver-lost", (data) => {
+  banner("DRIVER LOST");
+
+  console.log("⚠️ Driver disconnected");
+  console.log("🔄 Finding new driver...\n");
+
+  currentRide = null;
+  updateState("SEARCHING");
+
+  if (isOnline) {
+    startIdleRoaming();
+  }
+});
+
+// =====================================================
+// ❌ ERRORS / CANCELS
+// =====================================================
 
 socket.on("ride-cancelled", (ride) => {
   banner("RIDE CANCELLED");
@@ -426,7 +527,9 @@ socket.on("ride-cancelled", (ride) => {
 
   console.log("\n🚗 Back to searching...\n");
 
-  startIdleRoaming();
+  if (isOnline) {
+    startIdleRoaming();
+  }
 });
 
 socket.on("ride-error", (msg) => {

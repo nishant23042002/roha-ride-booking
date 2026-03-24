@@ -132,7 +132,7 @@ export async function completeRideService({ rideId, driverId }) {
       },
     });
 
-    await setDriverState(driverId, "searching");
+    await setDriverState(driverId, "searching").catch(() => {});
 
     // -----------------------------
     // 7️⃣ Wallet Credit

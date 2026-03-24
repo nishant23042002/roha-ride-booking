@@ -1,38 +1,43 @@
+// /src/services/dispatch/radiusSearchRedis.js
+
 import redis from "../../config/redis.js";
 import { findNearbyDrivers } from "../../modules/geo/geo.redis.js";
 import { getMultipleDriverStates } from "../../modules/driverState/driverState.redis.js";
 import Driver from "../../models/Driver.js";
+import { isRedisHealthy } from "../../config/redis.js";
 
-const SEARCH_RADII = [1, 2, 3, 5]; // km
-const GEO_TTL_PREFIX = "driver:geo:ttl:";
+const SEARCH_RADII = [1, 2, 3, 5];
 
+// =============================
+// 🚀 REDIS PRIMARY SEARCH
+// =============================
 export async function radiusDriverSearch({ pickupLat, pickupLng }) {
+  // =============================
+  // 🔴 REDIS DOWN → ONLY THEN MONGO
+  // =============================
+  if (!isRedisHealthy()) {
+    const fallback = await mongoFallbackSearch({
+      pickupLat,
+      pickupLng,
+      radiusKm: 5,
+    });
+
+    return {
+      driverIds: fallback,
+      radius: fallback.length ? 5000 : null,
+    };
+  }
+
+  // =============================
+  // 🟢 REDIS FLOW ONLY
+  // =============================
   for (const radiusKm of SEARCH_RADII) {
     console.log(`🔍 [REDIS GEO] Searching within ${radiusKm} km`);
 
     const nearby = await findNearbyDrivers(pickupLat, pickupLng, radiusKm);
 
-    // =============================
-    // ❌ NO REDIS DRIVERS → TRY MONGO
-    // =============================
     if (!nearby?.length) {
       console.log(`📊 No drivers in ${radiusKm} km`);
-
-      const fallbackDrivers = await mongoFallbackSearch({
-        pickupLat,
-        pickupLng,
-        radiusKm,
-      });
-
-      if (fallbackDrivers.length) {
-        console.log(`🛟 Mongo fallback found: ${fallbackDrivers.length}`);
-
-        return {
-          driverIds: fallbackDrivers,
-          radius: radiusKm * 1000,
-        };
-      }
-
       continue;
     }
 
@@ -44,44 +49,49 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
     );
 
     // =============================
-    // 🔥 FILTER BY GEO TTL (ALIVE)
+    // 🔥 STRICT TTL FILTER (GEO + ALIVE)
     // =============================
-    const ttlChecks = await Promise.all(
-      driverIds.map((id) => redis.exists(GEO_TTL_PREFIX + id)),
-    );
+    let results;
 
-    const aliveDrivers = driverIds.filter((id, i) => ttlChecks[i] === 1);
+    try {
+      const pipeline = redis.multi();
+
+      driverIds.forEach((id) => {
+        pipeline.exists(`driver:geo:ttl:${id}`); // GEO TTL
+      });
+      results = await pipeline.exec();
+    } catch (err) {
+      console.log("❌ Redis pipeline failed:", err.message);
+      return { driverIds: [], radius: null };
+    }
+
+    if (!results) {
+      console.log("⚠️ Redis returned null");
+      return { driverIds: [], radius: null };
+    }
+
+    const aliveDrivers = [];
+
+    for (let i = 0; i < driverIds.length; i++) {
+      const geoAlive = results[i]?.[1] === 1;
+
+      if (geoAlive) {
+        aliveDrivers.push(driverIds[i]);
+      }
+    }
 
     if (!aliveDrivers.length) {
-      console.log("⚠️ All drivers expired by GEO TTL");
+      console.log("⚠️ TTL miss — allowing recent drivers (grace)");
 
-      // 🛟 TRY MONGO FALLBACK HERE ALSO
-      const fallbackDrivers = await mongoFallbackSearch({
-        pickupLat,
-        pickupLng,
-        radiusKm,
-      });
-
-      if (fallbackDrivers.length) {
-        console.log(`🛟 Mongo fallback found: ${fallbackDrivers.length}`);
-
-        return {
-          driverIds: fallbackDrivers,
-          radius: radiusKm * 1000,
-        };
-      }
-
-      continue;
+      // 🔥 fallback to raw nearby (soft fail)
+      aliveDrivers.push(...driverIds);
     }
 
     // =============================
-    // 🔥 GET DRIVER STATES
+    // 🔥 STATE FILTER
     // =============================
     const stateMap = await getMultipleDriverStates(aliveDrivers);
 
-    // =============================
-    // ✅ FINAL FILTER
-    // =============================
     const availableDrivers = aliveDrivers.filter(
       (id) => stateMap[id] === "searching",
     );
@@ -94,49 +104,27 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
         radius: radiusKm * 1000,
       };
     }
-
-    // =============================
-    // 🛟 LAST CHANCE FALLBACK
-    // =============================
-    const fallbackDrivers = await mongoFallbackSearch({
-      pickupLat,
-      pickupLng,
-      radiusKm,
-    });
-
-    if (fallbackDrivers.length) {
-      console.log(`🛟 Mongo fallback found: ${fallbackDrivers.length}`);
-
-      return {
-        driverIds: fallbackDrivers,
-        radius: radiusKm * 1000,
-      };
-    }
   }
 
-  console.log("❌ No drivers found (Redis + Mongo)");
+  // =============================
+  // ❌ REDIS HAD NO MATCH → NOT FAILURE
+  // =============================
+  console.log("❌ No drivers found in Redis");
+
   return { driverIds: [], radius: null };
 }
 
+// =============================
+// 🛟 MONGO FALLBACK (ONLY WHEN REDIS DOWN)
+// =============================
 async function mongoFallbackSearch({ pickupLat, pickupLng, radiusKm }) {
   try {
-    console.log("🛟 FALLBACK → Mongo driver search");
-
     const drivers = await Driver.find({
       driverState: "searching",
-
-      // 🔥 FIXED LOGIC
-      $or: [
-        {
-          lastHeartbeat: {
-            $gte: new Date(Date.now() - 180000), // 3 min window
-          },
-        },
-        {
-          isOnline: true,
-        },
-      ],
-
+      isOnline: true,
+      lastHeartbeat: {
+        $gte: new Date(Date.now() - 120000),
+      },
       currentLocation: {
         $near: {
           $geometry: {

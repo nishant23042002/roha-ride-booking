@@ -13,37 +13,53 @@ import {
 // 🧠 Config
 const BATCHES = [2, 3, 5, 8]; // more attempts
 const RETRY_DELAYS = [8000, 12000, 15000, 20000];
+const activeDispatches = new Set();
 
 // =====================================================
 // 🚀 ENTRY POINT
 // =====================================================
 export async function startDispatch(rideId) {
+  if (activeDispatches.has(rideId)) {
+    console.log("⚠️ Dispatch already running → skipping duplicate start");
+    return;
+  }
+
+  activeDispatches.add(rideId);
+  console.log("🧠 ACTIVE DISPATCHES:", [...activeDispatches.keys()]);
+
   console.log("\n==============================");
   console.log("🚀 DISPATCH STARTED");
   console.log("Ride:", rideId);
   console.log("==============================\n");
 
-  const ride = await Ride.findById(rideId);
+  try {
+    const ride = await Ride.findById(rideId);
 
-  if (ride.status !== "requested") {
-    console.log("🛑 Ride already handled → stopping dispatch");
-    return;
+    if (ride.status !== "requested") {
+      console.log("🛑 Ride already handled → stopping dispatch");
+      activeDispatches.delete(rideId);
+      return;
+    }
+
+    if (ride.recovery) {
+      console.log("🧠 Starting dispatch in recovery mode");
+    }
+
+    const rideKey = rideId.toString();
+
+    await initDispatch(rideKey);
+
+    const context = {
+      attempt: 0,
+      lastNotifiedAt: new Map(),
+    };
+
+    await runDispatch(rideId, context);
+  } catch (error) {
+    console.log("Dispatch error: ", error.message);
+  } finally {
+    activeDispatches.delete(rideId);
   }
-
-  if (ride.recovery) {
-    console.log("🧠 Starting dispatch in recovery mode");
-  }
-
-  const rideKey = rideId.toString();
-
-  await initDispatch(rideKey);
-
-  const context = {
-    attempt: 0,
-    lastNotifiedAt: new Map(),
-  };
-
-  await runDispatch(rideId, context);
 }
 
 // =====================================================
@@ -202,7 +218,7 @@ async function runDispatch(rideId, context) {
 
       // 🚫 HARD LIMIT (ANTI-SPAM)
       if (notifiedCount >= 2) {
-        console.log(`🚫 Max notify reached: ${driverId}`);
+        console.log(`⚠️ Skip (notify limit this round): ${driverId}`);
         continue;
       }
 

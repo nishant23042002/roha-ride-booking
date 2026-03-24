@@ -46,7 +46,6 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
 
       await addRejected(rideId.toString(), driverId).catch(() => {});
 
-      console.log("🚫 Driver rejected (soft):", driverId);
       return ride;
     }
 

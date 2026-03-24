@@ -1,13 +1,8 @@
 import redis from "../../config/redis.js";
 import { safeRedis } from "../geo/geo.redis.js";
 
-const STATE_KEY = "driver:state"; // hash
+const STATE_KEY = "driver:state";
 const TTL = 120;
-
-// =============================
-// 🧠 KEY HELPERS
-// =============================
-const aliveKey = (driverId) => `driver:alive:${driverId}`;
 
 // =============================
 // 🚀 SET DRIVER STATE
@@ -17,12 +12,6 @@ export async function setDriverState(driverId, state) {
   await safeRedis(
     () => redis.hSet(STATE_KEY, driverId, state),
     "SET_DRIVER_STATE",
-  );
-
-  // 2️⃣ update liveness TTL
-  await safeRedis(
-    () => redis.set(aliveKey(driverId), "1", { EX: TTL }),
-    "SET_DRIVER_TTL",
   );
 
   // 3️⃣ optional: keep hash fresh
@@ -59,22 +48,13 @@ export async function getMultipleDriverStates(driverIds) {
 }
 
 // =============================
-// 💓 CHECK DRIVER ALIVE
-// =============================
-export async function isDriverAlive(driverId) {
-  const res = await safeRedis(
-    () => redis.exists(aliveKey(driverId)),
-    "CHECK_DRIVER_ALIVE",
-  );
-
-  return res === 1; // ✅ normalize to boolean
-}
-
-// =============================
 // ❌ REMOVE DRIVER STATE
 // =============================
 export async function removeDriverState(driverId) {
   await safeRedis(() => redis.hDel(STATE_KEY, driverId), "REMOVE_DRIVER_STATE");
 
-  await safeRedis(() => redis.del(aliveKey(driverId)), "REMOVE_DRIVER_TTL");
+  await safeRedis(
+    () => redis.del(`driver:geo:ttl:${driverId}`),
+    "REMOVE_GEO_TTL",
+  );
 }

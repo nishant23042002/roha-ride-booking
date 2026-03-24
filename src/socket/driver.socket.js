@@ -13,11 +13,11 @@ import {
   removeDriverState,
   setDriverState,
 } from "../modules/driverState/driverState.redis.js";
-import {
-  updateHeartbeat,
-  removeHeartbeat,
-} from "../modules/driverState/driverHeartbeat.redis.js";
 import { cancelRecovery } from "../modules/recovery/recovery.manager.js";
+import redis from "../config/redis.js";
+
+const GEO_TTL_PREFIX = "driver:geo:ttl:";
+const GEO_TTL_SECONDS = 90;
 
 const GPS_CONFIG = {
   searching: {
@@ -155,7 +155,6 @@ export default function registerDriverHandlers(socket) {
     });
 
     await setDriverState(driverId, safeState).catch(() => {});
-    await updateHeartbeat(driverId).catch(() => {});
 
     // =============================
     // 📍 ENSURE GEO EXISTS ON CONNECT
@@ -190,18 +189,16 @@ export default function registerDriverHandlers(socket) {
       isOnline: true,
     }).catch(() => {});
 
-    // Redis optional
-    await updateHeartbeat(driverId).catch(() => {});
+    // 🔥 SINGLE SOURCE OF TRUTH (Redis state + TTL)
+    const state = (await getDriverState(driverId)) || "searching";
 
-    // =============================
-    // 📍 REFRESH GEO TTL (IMPORTANT)
-    // =============================
-    const last = driverLastLocations.get(driverId);
+    await setDriverState(driverId, state).catch(() => {});
+    // inside heartbeat
+    await redis.set(GEO_TTL_PREFIX + driverId, "1", {
+      EX: GEO_TTL_SECONDS,
+    });
 
-    if (last) {
-      updateDriverLocation(driverId, last.lat, last.lng).catch(() => {});
-    }
-
+    console.log("💓 TTL REFRESH →", driverId);
     throttledLog(`heartbeat-${driverId}`, 5000, `💓 HEARTBEAT → ${driverId}`);
   });
 
@@ -234,7 +231,6 @@ export default function registerDriverHandlers(socket) {
       }
       const smoothed = smoothLocation(last, { lat, lng });
 
-      await updateHeartbeat(driverId).catch(() => {});
       throttledLog(`gps-${driverId}`, 5000, "📍 GPS_UPDATE");
 
       // =============================
@@ -355,7 +351,6 @@ export default function registerDriverHandlers(socket) {
         }).catch(() => {});
       }
 
-      await updateHeartbeat(driverId).catch(() => {});
       await setDriverState(driverId, "searching").catch(() => {});
 
       // =============================
@@ -404,7 +399,6 @@ export default function registerDriverHandlers(socket) {
         }
       }
 
-      await removeHeartbeat(driverId);
       activeDrivers.delete(driverId);
       driverLastLocations.delete(driverId);
 

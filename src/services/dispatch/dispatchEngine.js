@@ -54,8 +54,6 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
   // 🛟 2️⃣ MONGO FALLBACK SEARCH
   // =====================================================
   if (!driverIds.length) {
-    console.log("🛟 FALLBACK → Mongo driver search");
-
     try {
       const drivers = await Driver.find({
         isOnline: true,
@@ -109,6 +107,18 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
     };
   }
 
+  // =============================
+  // ❌ REMOVE REJECTED DRIVERS (CRITICAL FIX)
+  // =============================
+  const rejectedSet = new Set(Object.keys(dispatchState.rejectedDrivers || {}));
+
+  driverIds = driverIds.filter((id) => !rejectedSet.has(id));
+
+  if (!driverIds.length) {
+    console.log("⚠️ All drivers filtered out due to rejection");
+    return { driverIds: [], radius };
+  }
+
   // =====================================================
   // 5️⃣ BUILD ENRICHED DATA
   // =====================================================
@@ -136,6 +146,10 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
           rejectionCount = parsed.count || 0;
           rejectionTime = parsed.time || 0;
         } catch {}
+      }
+
+      if (rejectionCount >= 3 && Date.now() - rejectionTime < 60000) {
+        return null; // 🚫 hard skip
       }
 
       return {

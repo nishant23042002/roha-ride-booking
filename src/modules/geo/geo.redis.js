@@ -38,14 +38,13 @@ export async function safeRedis(op, label = "Redis") {
 // =============================
 export async function updateDriverLocation(driverId, lat, lng) {
   await safeRedis(async () => {
-    // ✅ GEO ADD
     await redis.geoAdd(GEO_KEY, {
       longitude: lng,
       latitude: lat,
       member: driverId,
     });
 
-    // ✅ GEO TTL KEY (heartbeat sync)
+    // ✅ ADD THIS
     await redis.set(GEO_TTL_PREFIX + driverId, "1", {
       EX: GEO_TTL_SECONDS,
     });

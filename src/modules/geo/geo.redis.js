@@ -3,7 +3,7 @@ import Driver from "../../models/Driver.js";
 
 const GEO_KEY = "driver:geo";
 const GEO_TTL_PREFIX = "driver:geo:ttl:";
-const GEO_TTL_SECONDS = 90; // ⏱️ keep in sync with heartbeat
+const GEO_TTL_SECONDS = 30; // ⏱️ keep in sync with heartbeat
 
 let lastFailureTime = 0;
 const COOLDOWN = 5000;

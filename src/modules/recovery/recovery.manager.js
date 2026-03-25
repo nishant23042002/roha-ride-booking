@@ -21,7 +21,7 @@ export function scheduleRecovery({ driverId, rideId, etaMinutes }) {
 
   // safety bounds
   recoveryTime = Math.max(recoveryTime, 30000); // min 30s
-  recoveryTime = Math.min(recoveryTime, 180000); // max 3min
+  recoveryTime = Math.min(recoveryTime, 120000); // max 2min
 
   console.log(
     `🧠 Recovery scheduled → driver=${driverId} time=${recoveryTime / 1000}s`,

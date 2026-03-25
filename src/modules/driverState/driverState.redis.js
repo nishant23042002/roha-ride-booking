@@ -2,7 +2,7 @@ import redis from "../../config/redis.js";
 import { safeRedis } from "../geo/geo.redis.js";
 
 const STATE_KEY = "driver:state";
-const TTL = 120;
+const TTL = 60;
 
 // =============================
 // 🚀 SET DRIVER STATE

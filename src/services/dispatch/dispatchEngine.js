@@ -2,7 +2,7 @@
 
 import { radiusDriverSearch } from "./radiusSearchRedis.js";
 import { calculateDriverETA } from "./etaCalculator.js";
-import { rankDrivers } from "./rankDrivers.js";
+import { getDriverScores } from "../../modules/driverScore/driveScore.redis.js";
 import Driver from "../../models/Driver.js";
 import Ride from "../../models/Ride.js";
 import { getDispatch } from "../../modules/dispatch/dispatch.redis.js";
@@ -190,12 +190,28 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
   // =====================================================
   // 6️⃣ RANK DRIVERS
   // =====================================================
-  const ranked = rankDrivers(enriched);
+  const scoreMap = await getDriverScores(
+    finalDrivers.map((d) => d.driver._id.toString()),
+  );
 
-  console.log("🏁 Ranked Drivers:");
+  const ranked = finalDrivers
+    .map((d) => ({
+      ...d,
+      score:
+        d.distanceKm * 2 +
+        d.etaMinutes * 3 +
+        (scoreMap[d.driver._id.toString()] || 0),
+    }))
+    .sort((a, b) => a.score - b.score);
+
+  // =============================
+  // 🧠 DEBUG LOG
+  // =============================
+  console.log("⚡ FAST RANKING MODE");
+
   ranked.forEach((d, i) => {
     console.log(
-      `#${i + 1} Driver=${d.driver._id} ETA=${d.etaMinutes} Rejects=${d.rejectionCount} Score=${d.score.toFixed(2)}`,
+      `#${i + 1} Driver=${d.driver._id} ETA=${d.etaMinutes} Score=${d.score}`,
     );
   });
 

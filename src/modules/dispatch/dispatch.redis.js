@@ -2,7 +2,7 @@ import redis from "../../config/redis.js";
 import { safeRedis } from "../geo/geo.redis.js";
 
 const PREFIX = "dispatch:ride:";
-const TTL = 300;
+const TTL = 120;
 
 // =============================
 // 🧠 KEY HELPERS

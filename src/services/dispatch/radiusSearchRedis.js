@@ -73,7 +73,7 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
     const aliveDrivers = [];
 
     for (let i = 0; i < driverIds.length; i++) {
-      const geoAlive = results[i]?.[1] === 1;
+      const geoAlive = results[i] && results[i][1] === 1;
 
       if (geoAlive) {
         aliveDrivers.push(driverIds[i]);
@@ -81,10 +81,8 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
     }
 
     if (!aliveDrivers.length) {
-      console.log("⚠️ TTL miss — allowing recent drivers (grace)");
-
-      // 🔥 fallback to raw nearby (soft fail)
-      aliveDrivers.push(...driverIds);
+      console.log("⚠️ TTL miss → using fallback drivers");
+      return driverIds; // early return for clarity
     }
 
     // =============================
@@ -96,8 +94,9 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
       (id) => stateMap[id] === "searching",
     );
 
-    console.log(`📊 Available drivers: ${availableDrivers.length}`);
-
+    console.log(
+      `📊 Radius=${radiusKm}km | total=${driverIds.length} | alive=${aliveDrivers.length} | available=${availableDrivers.length}`,
+    );
     if (availableDrivers.length) {
       return {
         driverIds: availableDrivers,

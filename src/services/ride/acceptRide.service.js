@@ -10,10 +10,17 @@ import {
   setDriverState,
 } from "../../modules/driverState/driverState.redis.js";
 import { isRedisHealthy } from "../../config/redis.js";
-import { getIO,onlineCustomers } from "../../socket/index.js";
+import { getIO, onlineCustomers } from "../../socket/index.js";
 import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
+import {
+  getMetrics,
+  trackAccept,
+} from "../../modules/driverMetrics/driverMetrics.redis.js";
+import { updateDriverScore } from "../../modules/driverScore/driveScore.redis.js";
 
 export async function acceptRideService({ rideId, driverId }) {
+  const requestStart = Date.now();
+
   throttledLog(
     `accept-attempt-${driverId}`,
     3000,
@@ -126,6 +133,11 @@ export async function acceptRideService({ rideId, driverId }) {
   });
 
   await setDriverState(driverId, "to_pickup").catch(() => {});
+
+  const responseTime = Date.now() - requestStart || ride.createdAt.getTime();
+  await trackAccept(driverId, responseTime);
+  const metrics = await getMetrics(driverId);
+  await updateDriverScore(driverId, metrics);
 
   // =============================
   // 🔥 CANCEL RECOVERY

@@ -9,6 +9,12 @@ import {
 } from "../../modules/dispatch/dispatch.redis.js";
 import { getIO, onlineCustomers } from "../../socket/index.js";
 import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
+import {
+  getMetrics,
+  trackCancel,
+  trackReject,
+} from "../../modules/driverMetrics/driverMetrics.redis.js";
+import { updateDriverScore } from "../../modules/driverScore/driveScore.redis.js";
 
 export async function cancelRideByDriverService({ rideId, driverId, reason }) {
   const session = await mongoose.startSession();
@@ -43,6 +49,9 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
       });
 
       await session.commitTransaction();
+      await trackReject(driverId);
+      const metrics = await getMetrics(driverId);
+      await updateDriverScore(driverId, metrics);
 
       await addRejected(rideId.toString(), driverId).catch(() => {});
 
@@ -76,6 +85,9 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
     await driver.save({ session });
 
     await session.commitTransaction();
+    await trackCancel(driverId);
+    const metrics = await getMetrics(driverId);
+    await updateDriverScore(driverId, metrics);
 
     banner("RIDE CANCELLED");
 

@@ -41,6 +41,12 @@ export async function startDispatch(rideId) {
       return;
     }
 
+    if (ride && ["completed", "cancelled"].includes(ride.status)) {
+      console.log("🧹 Clearing stale recovery flag");
+      ride.recovery = null;
+      await ride.save();
+    }
+    
     if (ride.recovery) {
       console.log("🧠 Starting dispatch in recovery mode");
     }
@@ -140,6 +146,10 @@ async function runDispatch(rideId, context) {
     }
 
     console.log("📊 Total drivers found:", driverIds.length);
+    console.log("📡 Dispatch Context:", {
+      rideId,
+      isRecovery,
+    });
 
     const io = getIO();
     if (!io) {

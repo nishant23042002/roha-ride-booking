@@ -15,9 +15,10 @@ import {
 } from "../modules/driverState/driverState.redis.js";
 import { cancelRecovery } from "../modules/recovery/recovery.manager.js";
 import redis from "../config/redis.js";
+import { initDriverMetrics } from "../modules/driverMetrics/driverMetrics.redis.js";
 
 const GEO_TTL_PREFIX = "driver:geo:ttl:";
-const GEO_TTL_SECONDS = 90;
+const GEO_TTL_SECONDS = 30;
 
 const GPS_CONFIG = {
   searching: {
@@ -66,13 +67,28 @@ export default function registerDriverHandlers(socket) {
     const io = getIO();
     if (!io) return;
 
-    const driver = await Driver.findById(driverId);
+    let driver = await Driver.findById(driverId);
 
-    // 🔥 cancel recovery ONLY if still owner
+    // 🔥 GLOBAL SAFETY CLEANUP
     if (driver?.currentRide) {
       const ride = await Ride.findById(driver.currentRide);
 
-      if (ride && ride.driver?.toString() === driverId) {
+      if (!ride || ["completed", "cancelled"].includes(ride.status)) {
+        console.log("🧹 GLOBAL CLEANUP → stale ride removed");
+
+        await Driver.findByIdAndUpdate(driverId, {
+          currentRide: null,
+          driverState: "searching",
+        });
+
+        // ✅ RELOAD DRIVER (CRITICAL FIX)
+        driver = await Driver.findById(driverId);
+      }
+      if (
+        ride &&
+        ride.driver?.toString() === driverId &&
+        !["completed", "cancelled"].includes(ride.status)
+      ) {
         cancelRecovery(driverId);
         console.log("🧠 Recovery cancelled (driver returned)");
       }
@@ -112,38 +128,51 @@ export default function registerDriverHandlers(socket) {
     if (driver?.currentRide) {
       const ride = await Ride.findById(driver.currentRide);
 
-      if (ride && ride.driver?.toString() === driverId) {
-        if (!["completed", "cancelled"].includes(ride.status)) {
-          const mappedState =
-            ride.status === "accepted"
-              ? "to_pickup"
-              : ride.status === "arrived"
-                ? "arrived"
-                : ride.status === "ongoing"
-                  ? "on_trip"
-                  : "searching";
+      // 🔥 HARD SAFETY CHECK
+      if (!ride) {
+        console.log("🧹 Invalid ride → clearing");
+        await Driver.findByIdAndUpdate(driverId, {
+          currentRide: null,
+          driverState: "searching",
+        });
+      } else if (
+        ride.driver?.toString() !== driverId ||
+        ["completed", "cancelled"].includes(ride.status)
+      ) {
+        console.log("🧹 Stale ride detected → cleaning", {
+          rideId: ride._id,
+          status: ride.status,
+        });
 
-          socket.join(`ride:${ride._id}`);
+        await Driver.findByIdAndUpdate(driverId, {
+          currentRide: null,
+          driverState: "searching",
+        });
 
-          socket.emit("ride-restored", {
-            ride: ride.toObject(),
-            state: mappedState,
-            status: ride.status,
-            isRecovery: !!ride.recovery,
-          });
+        safeState = "searching";
+      } else {
+        // ✅ VALID RESTORE ONLY
+        const mappedState =
+          ride.status === "accepted"
+            ? "to_pickup"
+            : ride.status === "arrived"
+              ? "arrived"
+              : ride.status === "ongoing"
+                ? "on_trip"
+                : "searching";
 
-          console.log("🔁 Ride restored:", ride._id);
+        socket.join(`ride:${ride._id}`);
 
-          safeState = mappedState;
-        } else {
-          // cleanup invalid ride
-          await Driver.findByIdAndUpdate(driverId, {
-            currentRide: null,
-            driverState: "searching",
-          });
+        socket.emit("ride-restored", {
+          ride: ride.toObject(),
+          state: mappedState,
+          status: ride.status,
+          isRecovery: !!ride.recovery,
+        });
 
-          safeState = "searching";
-        }
+        console.log("🔁 Ride restored:", ride._id);
+
+        safeState = mappedState;
       }
     }
 
@@ -155,7 +184,7 @@ export default function registerDriverHandlers(socket) {
     });
 
     await setDriverState(driverId, safeState).catch(() => {});
-
+    await initDriverMetrics(driverId);
     // =============================
     // 📍 ENSURE GEO EXISTS ON CONNECT
     // =============================
@@ -198,7 +227,7 @@ export default function registerDriverHandlers(socket) {
       EX: GEO_TTL_SECONDS,
     });
 
-    console.log("💓 TTL REFRESH →", driverId);
+    console.log(`💓 TTL REFRESH → ${driverId} | TTL=${GEO_TTL_SECONDS}s`);
     throttledLog(`heartbeat-${driverId}`, 5000, `💓 HEARTBEAT → ${driverId}`);
   });
 
@@ -405,7 +434,9 @@ export default function registerDriverHandlers(socket) {
       driverLastDBUpdate.delete(driverId);
 
       onlineDrivers.delete(driverId);
-      await removeDriverState(driverId).catch(() => {});
+      // 🔥 DO NOT REMOVE STATE HERE
+      // Let TTL expire naturally
+      console.log("⏳ Driver state cleanup deferred (TTL driven)");
 
       console.log("🔴 DRIVER OFFLINE:", driverId);
     } catch (err) {

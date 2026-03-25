@@ -133,6 +133,10 @@ export async function completeRideService({ rideId, driverId }) {
     });
 
     await setDriverState(driverId, "searching").catch(() => {});
+    console.log("✅ DRIVER RESET AFTER RIDE COMPLETE", {
+      driverId,
+      clearedRide: true,
+    });
 
     // -----------------------------
     // 7️⃣ Wallet Credit

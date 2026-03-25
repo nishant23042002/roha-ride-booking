@@ -6,7 +6,6 @@ import registerRideHandlers from "./ride.socket.js";
 import Driver from "../models/Driver.js";
 import { scheduleRecovery } from "../modules/recovery/recovery.manager.js";
 import Ride from "../models/Ride.js";
-import { removeDriverState } from "../modules/driverState/driverState.redis.js";
 import { changeDriverState } from "../services/driver/driverState.service.js";
 
 let io;
@@ -98,6 +97,7 @@ function handleDisconnect(socket) {
 
           if (
             ride &&
+            ride.driver?.toString() === userId &&
             ["accepted", "arrived", "ongoing"].includes(ride.status)
           ) {
             console.log("🚨 RECOVERY TRIGGERED");
@@ -116,6 +116,11 @@ function handleDisconnect(socket) {
               etaMinutes = 3; // driver already near
             } else if (ride.status === "ongoing") {
               etaMinutes = 5; // more time for reconnect
+            }
+
+            if (ride.status === "completed" || ride.status === "cancelled") {
+              console.log("🛑 Skip recovery → ride already finished");
+              return;
             }
 
             // =============================
@@ -146,10 +151,11 @@ function handleDisconnect(socket) {
         // =============================
         console.log("⏳ GEO cleanup deferred (TTL will handle)");
 
-        await removeDriverState(userId);
+        // 🔥 DO NOT REMOVE STATE IMMEDIATELY
+        // Let TTL handle it (prevents race issues)
+        console.log("⏳ Driver state cleanup deferred (TTL driven)");
         console.log("❌ Driver offline:", userId);
       }
-
       if (role === "customer") {
         onlineCustomers.delete(userId);
         console.log("❌ Customer removed:", userId);
@@ -159,6 +165,7 @@ function handleDisconnect(socket) {
     } catch (err) {
       console.log("❌ DISCONNECT ERROR:", err.message);
     }
+    // await removeDriverState(driverId).catch(() => {})
   }, DISCONNECT_GRACE);
 
   disconnectTimers.set(userId, timer);

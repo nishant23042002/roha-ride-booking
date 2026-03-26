@@ -1,10 +1,7 @@
-// /src/services/ride/acceptRideService.js
-
 import Ride from "../../models/Ride.js";
 import Driver from "../../models/Driver.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 import { throttledLog } from "../../core/logger/logger.js";
-import { setAccepted } from "../../modules/dispatch/dispatch.redis.js";
 import {
   getDriverState,
   setDriverState,
@@ -17,70 +14,71 @@ import {
   trackAccept,
 } from "../../modules/driverMetrics/driverMetrics.redis.js";
 import { updateDriverScore } from "../../modules/driverScore/driveScore.redis.js";
+import {
+  acquireRideDriverLock,
+  verifyLockOwnership,
+  releaseLockIfOwner,
+} from "../../modules/lock/lock.redis.js";
 
 export async function acceptRideService({ rideId, driverId }) {
   const requestStart = Date.now();
-
-  throttledLog(
-    `accept-attempt-${driverId}`,
-    3000,
-    `🚕 DRIVER TRY ACCEPT → ${driverId}`,
-  );
-
-  // =====================================================
-  // 🔍 2️⃣ DRIVER VALIDATION
-  // =====================================================
-  const driver = await Driver.findById(driverId);
-
-  if (!driver) {
-    throw new Error("Driver not found");
-  }
-
-  const HEARTBEAT_LIMIT = 30000;
-
-  if (
-    !driver.lastHeartbeat ||
-    Date.now() - new Date(driver.lastHeartbeat).getTime() > HEARTBEAT_LIMIT
-  ) {
-    throw new Error("Driver connection unstable");
-  }
-
-  let state = await getDriverState(driverId);
-
-  if (!state) {
-    state = driver.driverState; // Mongo fallback
-  }
-
-  if (state === "to_pickup" || state === "on_trip") {
-    throw new Error("Driver already on ride");
-  }
-
-  if (state !== null && state !== "searching") {
-    throw new Error("Driver not available");
-  }
-
-  // =====================================================
-  // 🔥 1️⃣ REDIS LOCK CHECK (FAST EXIT)
-  // =====================================================
   let locked = false;
 
-  // =============================
-  // 🔥 PRIMARY: REDIS LOCK
-  // =============================
-  if (isRedisHealthy()) {
-    locked = await setAccepted(rideId, driverId);
-  }
+  try {
+    throttledLog(
+      `accept-attempt-${driverId}`,
+      3000,
+      `🚕 DRIVER TRY ACCEPT → ${driverId}`,
+    );
 
-  // =============================
-  // 🛟 FALLBACK: DB LOCK
-  // =============================
-  let ride;
+    // =====================================================
+    // 🔍 DRIVER VALIDATION
+    // =====================================================
+    const driver = await Driver.findById(driverId);
 
-  if (!locked) {
-    console.log("🛟 FALLBACK → ATOMIC DB LOCK");
+    if (!driver) throw new Error("Driver not found");
 
-    // 🔥 atomic claim
-    ride = await Ride.findOneAndUpdate(
+    const HEARTBEAT_LIMIT = 30000;
+
+    if (
+      !driver.lastHeartbeat ||
+      Date.now() - new Date(driver.lastHeartbeat).getTime() > HEARTBEAT_LIMIT
+    ) {
+      throw new Error("Driver connection unstable");
+    }
+
+    let state = await getDriverState(driverId);
+    if (!state) state = driver.driverState;
+
+    if (state === "to_pickup" || state === "on_trip") {
+      throw new Error("Driver already on ride");
+    }
+
+    if (state !== null && state !== "searching") {
+      throw new Error("Driver not available");
+    }
+
+    // =====================================================
+    // 🔒 REDIS LOCK
+    // =====================================================
+    if (isRedisHealthy()) {
+      locked = await acquireRideDriverLock(rideId, driverId);
+
+      if (!locked) {
+        throw new Error("Ride already taken by another driver");
+      }
+
+      const isOwner = await verifyLockOwnership(rideId, driverId);
+
+      if (!isOwner) {
+        throw new Error("Lock ownership mismatch");
+      }
+    }
+
+    // =====================================================
+    // 🛟 DB CLAIM
+    // =====================================================
+    const ride = await Ride.findOneAndUpdate(
       {
         _id: rideId,
         status: "requested",
@@ -96,75 +94,67 @@ export async function acceptRideService({ rideId, driverId }) {
     );
 
     if (!ride) {
-      throw new Error("Ride already taken");
-    }
-  } else {
-    // =====================================================
-    // NORMAL FLOW AFTER REDIS LOCK
-    // =====================================================
-    ride = await Ride.findOneAndUpdate(
-      {
-        _id: rideId,
-        status: "requested",
-      },
-      {
-        $set: {
-          status: "accepted",
-          driver: driverId,
-          recovery: null, // 🔥 CLEAR RECOVERY
-        },
-      },
-      { returnDocument: "after" },
-    );
-
-    if (!ride) {
       throw new Error("Ride already accepted");
     }
-  }
 
-  // =====================================================
-  // 🚗 5️⃣ UPDATE DRIVER
-  // =====================================================
-  await Driver.findByIdAndUpdate(driverId, {
-    $set: {
-      driverState: "to_pickup",
-      currentRide: rideId,
-    },
-  });
+    // =====================================================
+    // 🚗 UPDATE DRIVER
+    // =====================================================
+    await Driver.findByIdAndUpdate(driverId, {
+      $set: {
+        driverState: "to_pickup",
+        currentRide: rideId,
+      },
+    });
 
-  await setDriverState(driverId, "to_pickup").catch(() => {});
+    await setDriverState(driverId, "to_pickup").catch(() => {});
 
-  const responseTime = Date.now() - requestStart || ride.createdAt.getTime();
-  await trackAccept(driverId, responseTime);
-  const metrics = await getMetrics(driverId);
-  await updateDriverScore(driverId, metrics);
+    // =====================================================
+    // 📊 METRICS
+    // =====================================================
+    const responseTime = Date.now() - requestStart;
+    await trackAccept(driverId, responseTime);
 
-  // =============================
-  // 🔥 CANCEL RECOVERY
-  // =============================
-  cancelRecovery(driverId);
+    const metrics = await getMetrics(driverId);
+    await updateDriverScore(driverId, metrics);
 
-  // =============================
-  // 📣 NOTIFY CUSTOMER
-  // =============================
-  const io = getIO();
-  const socketId = onlineCustomers.get(ride.customer.toString());
+    // =====================================================
+    // 🔥 CANCEL RECOVERY
+    // =====================================================
+    cancelRecovery(driverId);
 
-  if (io && socketId) {
-    io.to(socketId).emit("ride-accepted", {
-      rideId,
+    // =====================================================
+    // 📣 NOTIFY CUSTOMER
+    // =====================================================
+    const io = getIO();
+    const socketId = onlineCustomers.get(ride.customer.toString());
+
+    if (io && socketId) {
+      io.to(socketId).emit("ride-accepted", {
+        rideId,
+        driverId,
+      });
+    }
+
+    // =====================================================
+    // ✅ SUCCESS
+    // =====================================================
+    banner("RIDE CLAIMED");
+
+    rideLog(rideId, "ACCEPT_SUCCESS", "Driver successfully claimed ride", {
       driverId,
     });
+
+    return ride.toObject();
+  } catch (err) {
+    console.log("❌ ACCEPT ERROR:", err.message);
+    throw err;
+  } finally {
+    // =====================================================
+    // 🔓 RELEASE LOCK (SUCCESS PATH)
+    // =====================================================
+    if (locked) {
+      await releaseLockIfOwner(rideId, driverId).catch(() => {});
+    }
   }
-
-  // =====================================================
-  // ✅ SUCCESS
-  // =====================================================
-  banner("RIDE CLAIMED");
-
-  rideLog(rideId, "ACCEPT_SUCCESS", "Driver successfully claimed ride", {
-    driverId,
-  });
-
-  return ride.toObject();
 }

@@ -8,17 +8,12 @@ const TTL = 120;
 // 🧠 KEY HELPERS
 // =============================
 const base = (rideId) => `${PREFIX}${rideId}:meta`;
-const lockKey = (rideId) => `${PREFIX}${rideId}:lock`;
 const notifiedKey = (rideId) => `${PREFIX}${rideId}:notified`;
 const rotationKey = (rideId) => `${PREFIX}${rideId}:rotation`;
 const rejectedKey = (rideId) => `${PREFIX}${rideId}:rejected`;
 
-const touchTTL = async (rideId) => {
-  await safeRedis(() => redis.expire(base(rideId), TTL), "TTL_BASE");
-};
-
 // =============================
-// 🚀 INIT DISPATCH
+// 🧠 INIT DISPATCH
 // =============================
 export async function initDispatch(rideId) {
   await safeRedis(
@@ -34,28 +29,26 @@ export async function initDispatch(rideId) {
 }
 
 // =============================
-// 🔄 MARK DRIVER NOTIFIED
+// 🔄 MARK DRIVER NOTIFIED (PIPELINED)
 // =============================
 export async function markDriverNotified(rideId, driverId) {
-  await safeRedis(
-    () => redis.hSet(rotationKey(rideId), driverId, Date.now()),
-    "ROTATION_SET",
-  );
+  await safeRedis(async () => {
+    const pipeline = redis.multi();
 
-  await safeRedis(
-    () => redis.hIncrBy(notifiedKey(rideId), driverId, 1),
-    "NOTIFIED_INCREMENT",
-  );
+    pipeline.hSet(rotationKey(rideId), driverId, Date.now());
+    pipeline.hIncrBy(notifiedKey(rideId), driverId, 1);
 
-  await safeRedis(() => redis.expire(rotationKey(rideId), TTL), "TTL_ROTATION");
+    // TTL refresh together (important)
+    pipeline.expire(rotationKey(rideId), TTL);
+    pipeline.expire(notifiedKey(rideId), TTL);
+    pipeline.expire(base(rideId), TTL);
 
-  await safeRedis(() => redis.expire(notifiedKey(rideId), TTL), "TTL_NOTIFIED");
-
-  await touchTTL(rideId);
+    await pipeline.exec();
+  }, "MARK_DRIVER_NOTIFIED");
 }
 
 // =============================
-// 📥 GET ROTATION
+// 📥 GET ROTATION (SAFE)
 // =============================
 export async function getRotation(rideId) {
   const data = await safeRedis(
@@ -67,38 +60,18 @@ export async function getRotation(rideId) {
 }
 
 // =============================
-// ✅ LOCK (FIRST DRIVER WINS)
-// =============================
-export async function setAccepted(rideId, driverId) {
-  const result = await safeRedis(
-    () =>
-      redis.set(lockKey(rideId), driverId, {
-        NX: true,
-        EX: TTL,
-      }),
-    "SET_LOCK",
-  );
-
-  await touchTTL(rideId);
-
-  if (!result) return false;
-
-  console.log("✅ LOCK ACQUIRED:", rideId, driverId);
-  return true;
-}
-
-// =============================
-// ❌ ADD REJECTED DRIVER
+// ❌ ADD REJECTED DRIVER (PIPELINED)
 // =============================
 export async function addRejected(rideId, driverId) {
   const key = rejectedKey(rideId);
+  console.log("🧠 WRITE KEY:", rejectedKey(rideId));
+
+  let count = 1;
 
   const existing = await safeRedis(
     () => redis.hGet(key, driverId),
     "GET_REJECTED",
   );
-
-  let count = 1;
 
   if (existing) {
     try {
@@ -112,27 +85,31 @@ export async function addRejected(rideId, driverId) {
     time: Date.now(),
   });
 
-  await safeRedis(() => redis.hSet(key, driverId, payload), "SET_REJECTED");
+  await safeRedis(async () => {
+    const pipeline = redis.multi();
 
-  await safeRedis(() => redis.expire(key, TTL), "TTL_REJECTED");
+    pipeline.hSet(key, driverId, payload);
+    pipeline.expire(key, TTL);
+    pipeline.expire(base(rideId), TTL);
 
-  await touchTTL(rideId);
+    await pipeline.exec();
+  }, "SET_REJECTED");
 
   console.log(`🚫 Rejected → ${driverId} (count=${count})`);
 }
 
 // =============================
-// 📥 GET DISPATCH STATE
+// 📥 GET DISPATCH STATE (OPTIMIZED)
 // =============================
 export async function getDispatch(rideId) {
-  const [rejectedRaw, notifiedRaw] = await Promise.all([
-    safeRedis(() => redis.hGetAll(rejectedKey(rideId)), "GET_REJECTED_ALL"),
-    safeRedis(() => redis.hGetAll(notifiedKey(rideId)), "GET_NOTIFIED_ALL"),
-  ]);
+  const rejected = await redis.hGetAll(rejectedKey(rideId));
+  const notified = await redis.hGetAll(notifiedKey(rideId));
+
+  console.log("🧠 RAW REDIS:", { rejected, notified });
 
   return {
-    rejectedDrivers: rejectedRaw || {},
-    notifiedDrivers: notifiedRaw || {},
+    rejectedDrivers: rejected || {},
+    notifiedDrivers: notified || {},
   };
 }
 
@@ -140,35 +117,28 @@ export async function getDispatch(rideId) {
 // 🔍 CHECK DISPATCH ACTIVE
 // =============================
 export async function isDispatchRunning(rideId) {
-  const keys = [
-    base(rideId),
-    lockKey(rideId),
-    rotationKey(rideId),
-    notifiedKey(rideId),
-  ];
-
-  const results = await Promise.all(
-    keys.map((k) => safeRedis(() => redis.exists(k), "CHECK_KEY")),
+  const exists = await safeRedis(
+    () => redis.exists(base(rideId)),
+    "CHECK_DISPATCH_ACTIVE",
   );
 
-  return results.some((r) => r === 1);
+  return exists === 1;
 }
 
 // =============================
-// 🧹 CLEAR DISPATCH
+// 🧹 CLEAR DISPATCH (PIPELINED)
 // =============================
 export async function clearDispatch(rideId) {
-  await safeRedis(
-    () =>
-      redis.del(
-        base(rideId),
-        lockKey(rideId),
-        rotationKey(rideId),
-        notifiedKey(rideId),
-        rejectedKey(rideId),
-      ),
-    "CLEAR_DISPATCH",
-  );
+  await safeRedis(async () => {
+    const pipeline = redis.multi();
+
+    pipeline.del(base(rideId));
+    pipeline.del(rotationKey(rideId));
+    pipeline.del(notifiedKey(rideId));
+    pipeline.del(rejectedKey(rideId));
+
+    await pipeline.exec();
+  }, "CLEAR_DISPATCH");
 
   console.log("🧹 Dispatch cleared:", rideId);
 }

@@ -3,6 +3,7 @@ import {
   requestRide,
   updateRideStatus,
   getAllRides,
+  getRideById,
 } from "../controllers/rideController.controller.js";
 import {
   cancelRideByCustomer,
@@ -14,6 +15,8 @@ const router = express.Router();
 
 router.post("/request", requestRide);
 router.post("/status", updateRideStatus);
+router.get("/:rideId", getRideById);
+
 // CUSTOMER
 router.post("/cancel/customer", cancelRideByCustomer);
 router.post("/estimate", estimateFare);

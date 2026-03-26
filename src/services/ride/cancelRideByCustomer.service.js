@@ -6,6 +6,7 @@ import { rideLog, banner } from "../../utils/rideLogger.js";
 import { clearDispatch } from "../../modules/dispatch/dispatch.redis.js";
 import { getIO, onlineDrivers } from "../../socket/index.js";
 import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
+import { releaseLockIfOwner } from "../../modules/lock/lock.redis.js";
 
 export async function cancelRideByCustomerService({ rideId, reason }) {
   const session = await mongoose.startSession();
@@ -40,7 +41,7 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     // =============================
     // 🔄 RESET DRIVER
     // =============================
-    if (driverId) {
+    if (driverId && ride.driver?.toString() === driverId) {
       const driver = await Driver.findById(driverId).session(session);
 
       if (driver) {
@@ -69,6 +70,9 @@ export async function cancelRideByCustomerService({ rideId, reason }) {
     // =============================
     await clearDispatch(rideId.toString()).catch(() => {});
     if (driverId) cancelRecovery(driverId);
+    if (driverId) {
+      await releaseLockIfOwner(rideId, driverId).catch(() => {});
+    }
 
     // =============================
     // 📣 NOTIFY DRIVER

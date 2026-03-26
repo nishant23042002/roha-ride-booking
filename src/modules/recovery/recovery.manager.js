@@ -116,7 +116,9 @@ export function scheduleRecovery({ driverId, rideId, etaMinutes }) {
       await clearDispatch(rideId);
 
       // 2️⃣ RESTART DISPATCH
-      await startDispatch(rideId);
+      startDispatch(rideId).catch((err) => {
+        console.error("❌ DISPATCH ERROR:", err.message);
+      });
 
       console.log("🚀 Dispatch restarted after recovery");
     } catch (err) {

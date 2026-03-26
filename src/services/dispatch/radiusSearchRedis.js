@@ -1,6 +1,5 @@
 // /src/services/dispatch/radiusSearchRedis.js
 
-import redis from "../../config/redis.js";
 import { findNearbyDrivers } from "../../modules/geo/geo.redis.js";
 import { getMultipleDriverStates } from "../../modules/driverState/driverState.redis.js";
 import Driver from "../../models/Driver.js";
@@ -12,10 +11,17 @@ const SEARCH_RADII = [1, 2, 3, 5];
 // 🚀 REDIS PRIMARY SEARCH
 // =============================
 export async function radiusDriverSearch({ pickupLat, pickupLng }) {
+  if (pickupLat == null || pickupLng == null) {
+    console.log("❌ Invalid pickup coords");
+    return { driverIds: [], radius: null };
+  }
+
   // =============================
-  // 🔴 REDIS DOWN → ONLY THEN MONGO
+  // 🔴 REDIS DOWN → FALLBACK
   // =============================
   if (!isRedisHealthy()) {
+    console.log("⚠️ Redis DOWN → using Mongo fallback");
+
     const fallback = await mongoFallbackSearch({
       pickupLat,
       pickupLng,
@@ -29,7 +35,7 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
   }
 
   // =============================
-  // 🟢 REDIS FLOW ONLY
+  // 🟢 REDIS FLOW
   // =============================
   for (const radiusKm of SEARCH_RADII) {
     console.log(`🔍 [REDIS GEO] Searching within ${radiusKm} km`);
@@ -42,62 +48,41 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
     }
 
     // =============================
-    // 🧠 EXTRACT DRIVER IDS
+    // 🧠 EXTRACT DRIVER IDS (FIXED)
     // =============================
-    const driverIds = nearby.map((d) =>
-      typeof d === "string" ? d : d.member || d,
-    );
+    const driverIds = nearby.map((d) => {
+      if (Array.isArray(d)) return d[0]; // [driverId, distance]
+      return typeof d === "string" ? d : d?.member;
+    });
+
+    if (!driverIds.length) {
+      console.log("⚠️ No valid driverIds extracted");
+      continue;
+    }
 
     // =============================
-    // 🔥 STRICT TTL FILTER (GEO + ALIVE)
+    // 🔥 STATE FILTER (CRITICAL)
     // =============================
-    let results;
+    let stateMap = {};
 
     try {
-      const pipeline = redis.multi();
-
-      driverIds.forEach((id) => {
-        pipeline.exists(`driver:geo:ttl:${id}`); // GEO TTL
-      });
-      results = await pipeline.exec();
+      stateMap = await getMultipleDriverStates(driverIds);
     } catch (err) {
-      console.log("❌ Redis pipeline failed:", err.message);
-      return { driverIds: [], radius: null };
+      console.log("❌ Redis state fetch failed:", err.message);
+      continue;
     }
 
-    if (!results) {
-      console.log("⚠️ Redis returned null");
-      return { driverIds: [], radius: null };
-    }
-
-    const aliveDrivers = [];
-
-    for (let i = 0; i < driverIds.length; i++) {
-      const geoAlive = results[i] && results[i][1] === 1;
-
-      if (geoAlive) {
-        aliveDrivers.push(driverIds[i]);
-      }
-    }
-
-    if (!aliveDrivers.length) {
-      console.log("⚠️ TTL miss → using fallback drivers");
-      return driverIds; // early return for clarity
-    }
-
-    // =============================
-    // 🔥 STATE FILTER
-    // =============================
-    const stateMap = await getMultipleDriverStates(aliveDrivers);
-
-    const availableDrivers = aliveDrivers.filter(
+    const availableDrivers = driverIds.filter(
       (id) => stateMap[id] === "searching",
     );
 
     console.log(
-      `📊 Radius=${radiusKm}km | total=${driverIds.length} | alive=${aliveDrivers.length} | available=${availableDrivers.length}`,
+      `📊 Radius=${radiusKm}km | total=${driverIds.length} | available=${availableDrivers.length}`,
     );
+
     if (availableDrivers.length) {
+      console.log("📡 DRIVER SOURCE → REDIS");
+
       return {
         driverIds: availableDrivers,
         radius: radiusKm * 1000,
@@ -106,7 +91,7 @@ export async function radiusDriverSearch({ pickupLat, pickupLng }) {
   }
 
   // =============================
-  // ❌ REDIS HAD NO MATCH → NOT FAILURE
+  // ❌ NO DRIVERS IN REDIS
   // =============================
   console.log("❌ No drivers found in Redis");
 
@@ -136,6 +121,8 @@ async function mongoFallbackSearch({ pickupLat, pickupLng, radiusKm }) {
     })
       .limit(10)
       .select("_id");
+
+    console.log("📡 DRIVER SOURCE → MONGO");
 
     return drivers.map((d) => d._id.toString());
   } catch (err) {

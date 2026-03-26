@@ -9,12 +9,23 @@ import { throttledLog } from "../../core/logger/logger.js";
 import { setDriverState } from "../../modules/driverState/driverState.redis.js";
 import { getIO, onlineCustomers } from "../../socket/index.js";
 import { cancelRecovery } from "../../modules/recovery/recovery.manager.js";
+import { releaseLockIfOwner } from "../../modules/lock/lock.redis.js";
 
 export async function startRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
 
   try {
     session.startTransaction();
+
+    const existingRide = await Ride.findById(rideId).session(session);
+
+    if (!existingRide) {
+      throw new Error("Ride not found");
+    }
+
+    if (existingRide.driver?.toString() !== driverId) {
+      throw new Error("Not your ride");
+    }
 
     banner("RIDE STARTING");
 
@@ -45,6 +56,13 @@ export async function startRideService({ rideId, driverId }) {
     if (!ride) {
       // check if already started
       const existingRide = await Ride.findById(rideId).session(session);
+      if (!existingRide) {
+        throw new Error("Ride not found");
+      }
+
+      if (existingRide.driver?.toString() !== driverId) {
+        throw new Error("Not your ride");
+      }
 
       if (existingRide?.rideStartTime) {
         console.log("⚠️ DUPLICATE START BLOCKED:", rideId);
@@ -78,36 +96,36 @@ export async function startRideService({ rideId, driverId }) {
     });
 
     await session.commitTransaction();
-
     // =============================
     // 🔥 CRITICAL: CANCEL RECOVERY
     // =============================
     cancelRecovery(driverId);
-
+    
     // =============================
     // 🔄 REDIS SYNC (SAFE)
     // =============================
     await setDriverState(driverId, "on_trip").catch(() => {});
-
+    
     // =============================
     // 📣 NOTIFY CUSTOMER
     // =============================
     const io = getIO();
     const socketId = onlineCustomers.get(ride.customer.toString());
-
+    
     if (io && socketId) {
       io.to(socketId).emit("ride-started", {
         rideId,
       });
     }
-
+    
     rideLog(rideId, "RIDE_STARTED", "Ride has officially started", {
       driverId,
     });
-
+    
     return ride;
   } catch (error) {
     await session.abortTransaction();
+    await releaseLockIfOwner(rideId, driverId).catch(() => {});
     throw error;
   } finally {
     session.endSession();

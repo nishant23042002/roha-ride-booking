@@ -10,7 +10,6 @@ import { rateLimit } from "../core/rateLimiter.js";
 import { updateDriverLocation } from "../modules/geo/geo.redis.js";
 import {
   getDriverState,
-  removeDriverState,
   setDriverState,
 } from "../modules/driverState/driverState.redis.js";
 import { cancelRecovery } from "../modules/recovery/recovery.manager.js";
@@ -18,7 +17,7 @@ import redis from "../config/redis.js";
 import { initDriverMetrics } from "../modules/driverMetrics/driverMetrics.redis.js";
 
 const GEO_TTL_PREFIX = "driver:geo:ttl:";
-const GEO_TTL_SECONDS = 30;
+const GEO_TTL_SECONDS = 60;
 
 const GPS_CONFIG = {
   searching: {

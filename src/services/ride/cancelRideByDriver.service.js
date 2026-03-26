@@ -15,6 +15,7 @@ import {
   trackReject,
 } from "../../modules/driverMetrics/driverMetrics.redis.js";
 import { updateDriverScore } from "../../modules/driverScore/driveScore.redis.js";
+import { releaseLockIfOwner } from "../../modules/lock/lock.redis.js";
 
 export async function cancelRideByDriverService({ rideId, driverId, reason }) {
   const session = await mongoose.startSession();
@@ -23,19 +24,29 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
     session.startTransaction();
 
     const ride = await Ride.findById(rideId).session(session);
+
     if (!ride) throw new Error("Ride not found");
 
-    if (ride.status === "cancelled") return ride;
+    if (ride.driver && ride.driver.toString() !== driverId) {
+      throw new Error("Not your ride");
+    }
+
+    if (ride.status === "cancelled") {
+      await session.commitTransaction();
+      return ride;
+    }
 
     const driver = await Driver.findById(driverId).session(session);
     if (!driver) throw new Error("Driver not found");
 
-    // =============================
-    // 🔥 SOFT CANCEL (REQUESTED)
-    // =============================
+    // =====================================================
+    // 🔥 SOFT REJECT (REQUESTED STATE)
+    // =====================================================
     if (ride.status === "requested") {
+      // ✅ DO NOT attach driver
       ride.driver = null;
 
+      // ✅ TRACK REJECTION IN MONGO
       const rejectedSet = new Set(ride.rejectedDrivers || []);
       rejectedSet.add(driverId);
       ride.rejectedDrivers = [...rejectedSet];
@@ -49,25 +60,39 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
       });
 
       await session.commitTransaction();
-      await trackReject(driverId);
-      const metrics = await getMetrics(driverId);
-      await updateDriverScore(driverId, metrics);
 
+      // =============================
+      // 🔥 POST-COMMIT (IMPORTANT)
+      // =============================
+      await trackReject(driverId).catch(() => {});
+
+      const metrics = await getMetrics(driverId).catch(() => null);
+      if (metrics) {
+        await updateDriverScore(driverId, metrics).catch(() => {});
+      }
+
+      // ✅ REDIS SOURCE OF TRUTH
       await addRejected(rideId.toString(), driverId).catch(() => {});
+
+      // 🔓 release lock if any
+      await releaseLockIfOwner(rideId, driverId).catch(() => {});
+      // 🔥 FORCE CONSISTENCY DELAY (small but critical)
+      await new Promise((res) => setTimeout(res, 50));
+      console.log("🚫 DRIVER REJECTED RIDE:", driverId);
 
       return ride;
     }
 
-    // =============================
-    // ❌ BLOCK ACCEPTED CANCEL (RULE)
-    // =============================
+    // =====================================================
+    // ❌ BLOCK INVALID CANCEL
+    // =====================================================
     if (ride.status === "accepted") {
       throw new Error("❌ Cannot cancel after accepting ride");
     }
 
-    // =============================
-    // 🔥 HARD CANCEL
-    // =============================
+    // =====================================================
+    // 🔥 HARD CANCEL (RARE)
+    // =====================================================
     ride.status = "cancelled";
     ride.cancelledBy = "driver";
     ride.cancelReason = reason || "Driver cancelled";
@@ -85,9 +110,16 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
     await driver.save({ session });
 
     await session.commitTransaction();
-    await trackCancel(driverId);
-    const metrics = await getMetrics(driverId);
-    await updateDriverScore(driverId, metrics);
+
+    // =============================
+    // 🔥 POST COMMIT OPERATIONS
+    // =============================
+    await trackCancel(driverId).catch(() => {});
+
+    const metrics = await getMetrics(driverId).catch(() => null);
+    if (metrics) {
+      await updateDriverScore(driverId, metrics).catch(() => {});
+    }
 
     banner("RIDE CANCELLED");
 
@@ -119,6 +151,7 @@ export async function cancelRideByDriverService({ rideId, driverId, reason }) {
 
     return ride;
   } catch (err) {
+    await releaseLockIfOwner(rideId, driverId).catch(() => {});
     await session.abortTransaction();
     throw err;
   } finally {

@@ -10,6 +10,7 @@ import { changeDriverState } from "../driver/driverState.service.js";
 import { rideLog, banner } from "../../utils/rideLogger.js";
 import { clearDispatch } from "../../modules/dispatch/dispatch.redis.js";
 import { setDriverState } from "../../modules/driverState/driverState.redis.js";
+import { releaseLockIfOwner } from "../../modules/lock/lock.redis.js";
 
 export async function completeRideService({ rideId, driverId }) {
   const session = await mongoose.startSession();
@@ -28,6 +29,9 @@ export async function completeRideService({ rideId, driverId }) {
 
     if (!ride) {
       throw new Error("Invalid ride state");
+    }
+    if (ride.driver?.toString() !== driverId) {
+      throw new Error("Not your ride");
     }
 
     // -----------------------------
@@ -157,9 +161,9 @@ export async function completeRideService({ rideId, driverId }) {
       driverEarning: ride.driverEarning,
       platformCommission: ride.platformCommission,
     });
-
     return ride;
   } catch (error) {
+    await releaseLockIfOwner(rideId, driverId).catch(() => {});
     await session.abortTransaction();
     throw error;
   } finally {

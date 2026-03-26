@@ -113,20 +113,6 @@ export const requestRide = async (req, res) => {
       passengerCount,
     });
 
-    const { driverIds } = await findBestDrivers({
-      pickupLat: pickupLatitude,
-      pickupLng: pickupLongitude,
-      rideId: ride.toString(), // 🔥 CRITICAL FIX
-    });
-
-    if (!driverIds || !driverIds.length) {
-      console.log("❌ No drivers available nearby");
-
-      return res.status(404).json({
-        message: "No drivers available nearby",
-      });
-    }
-
     // =============================
     // 🚀 START DISPATCH ENGINE
     // =============================
@@ -143,6 +129,32 @@ export const requestRide = async (req, res) => {
   } catch (error) {
     console.log("\n❌ RIDE REQUEST ERROR");
     console.log(error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// =====================================================
+// 🔍 GET RIDE BY ID
+// =====================================================
+export const getRideById = async (req, res) => {
+  try {
+    const { rideId } = req.params;
+
+    if (!rideId) {
+      return res.status(400).json({ message: "RideId is required" });
+    }
+
+    const ride = await Ride.findById(rideId)
+      .populate("driver", "driverState vehicleType")
+      .populate("customer", "name");
+
+    if (!ride) {
+      return res.status(404).json({ message: "Ride not found" });
+    }
+
+    res.status(200).json(ride);
+  } catch (error) {
+    console.log("❌ GET RIDE ERROR:", error.message);
     res.status(500).json({ message: error.message });
   }
 };

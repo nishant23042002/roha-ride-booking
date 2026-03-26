@@ -12,10 +12,12 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
   console.log("\n🔍 FIND BEST DRIVERS START");
   console.log("Pickup:", pickupLat, pickupLng);
 
-  // =====================================================
-  // 🧠 LOAD RIDE (FOR RECOVERY MODE)
-  // =====================================================
   let ride = null;
+  let source = "none";
+
+  // =====================================================
+  // 🧠 LOAD RIDE (RECOVERY MODE)
+  // =====================================================
   try {
     ride = await Ride.findById(rideId).select("driver recovery");
   } catch {}
@@ -23,14 +25,14 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
   const isRecovery = !!ride?.recovery;
 
   if (isRecovery) {
-    console.log("🧠 RECOVERY DRIVER SEARCH MODE");
+    console.log("🧠 RECOVERY MODE ACTIVE");
   }
 
   let driverIds = [];
   let radius = 0;
 
   // =====================================================
-  // 🔥 1️⃣ REDIS PRIMARY SEARCH (SAFE)
+  // 🔥 REDIS SEARCH (PRIMARY)
   // =====================================================
   if (isRedisHealthy()) {
     try {
@@ -42,18 +44,17 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
       if (result && Array.isArray(result.driverIds)) {
         driverIds = result.driverIds;
         radius = result.radius || 0;
+        source = "redis";
       }
     } catch (err) {
       console.log("❌ Redis search failed:", err.message);
     }
-  } else {
-    console.log("⚠️ Redis marked DOWN → skipping Redis search");
   }
 
   // =====================================================
-  // 🛟 2️⃣ MONGO FALLBACK SEARCH
+  // 🛟 MONGO FALLBACK (ONLY IF REDIS DOWN)
   // =====================================================
-  if (!driverIds.length) {
+  if (!driverIds.length && !isRedisHealthy()) {
     try {
       const drivers = await Driver.find({
         isOnline: true,
@@ -64,21 +65,22 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
         .select("_id currentLocation vehicleType tierLevel lastHeartbeat");
 
       driverIds = drivers.map((d) => d._id.toString());
+      source = "mongo";
     } catch (err) {
       console.log("❌ Mongo fallback failed:", err.message);
     }
   }
 
   // =====================================================
-  // ❌ NO DRIVERS (SAFE EXIT)
+  // ❌ NO DRIVERS
   // =====================================================
-  if (!driverIds || !driverIds.length) {
+  if (!driverIds.length) {
     console.log("❌ No drivers found (Redis + Mongo)");
-    return { driverIds: [], radius };
+    return { driverIds: [], radius, source };
   }
 
   // =====================================================
-  // 3️⃣ FETCH DRIVER DATA
+  // 📦 FETCH DRIVER DATA
   // =====================================================
   let drivers = [];
 
@@ -88,107 +90,87 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
     }).select("currentLocation vehicleType tierLevel lastHeartbeat");
   } catch (err) {
     console.log("❌ Driver fetch failed:", err.message);
-    return { driverIds: [], radius };
+    return { driverIds: [], radius, source };
   }
 
   const driverMap = new Map(drivers.map((d) => [d._id.toString(), d]));
 
   // =====================================================
-  // 4️⃣ GET DISPATCH STATE (SAFE)
+  // 📊 DISPATCH STATE
   // =====================================================
   let dispatchState = await getDispatch(rideId);
 
   if (!dispatchState) {
-    console.log("⚠️ Redis dispatch unavailable → using defaults");
-
     dispatchState = {
       rejectedDrivers: {},
       notifiedDrivers: {},
     };
   }
 
-  // =============================
-  // ❌ REMOVE REJECTED DRIVERS (CRITICAL FIX)
-  // =============================
-  const rejectedSet = new Set(Object.keys(dispatchState.rejectedDrivers || {}));
+  const rejectedMap = dispatchState.rejectedDrivers || {};
 
-  driverIds = driverIds.filter((id) => !rejectedSet.has(id));
+  // =====================================================
+  // 🧠 BUILD ENRICHED DRIVERS
+  // =====================================================
+  const enriched = [];
 
-  if (!driverIds.length) {
-    console.log("⚠️ All drivers filtered out due to rejection");
-    return { driverIds: [], radius };
+  for (const id of driverIds) {
+    const driver = driverMap.get(id);
+    if (!driver) continue;
+
+    // ❌ Skip same driver in recovery
+    if (isRecovery && ride?.driver?.toString() === id) continue;
+
+    const eta = calculateDriverETA(driver, pickupLat, pickupLng);
+    if (!eta) continue;
+
+    let rejectionCount = 0;
+    let rejectionTime = 0;
+
+    const rejectData = rejectedMap[id];
+
+    if (rejectData) {
+      try {
+        const parsed = JSON.parse(rejectData);
+        rejectionCount = parsed.count || 0;
+        rejectionTime = parsed.time || 0;
+      } catch {}
+    }
+
+    // =====================================================
+    // 🚫 HARD FILTERS (CRITICAL)
+    // =====================================================
+    if (rejectionCount >= 2) continue;
+
+    if (Date.now() - rejectionTime < 10000) continue;
+
+    enriched.push({
+      driver,
+      ...eta,
+      rejectionCount,
+    });
   }
 
   // =====================================================
-  // 5️⃣ BUILD ENRICHED DATA
-  // =====================================================
-  const enriched = driverIds
-    .map((id) => {
-      const driver = driverMap.get(id);
-      if (!driver) return null;
-
-      // ❌ SKIP SAME DRIVER IN RECOVERY
-      if (isRecovery && ride?.driver?.toString() === id) {
-        return null;
-      }
-
-      const eta = calculateDriverETA(driver, pickupLat, pickupLng);
-      if (!eta) return null;
-
-      const rejectData = dispatchState.rejectedDrivers?.[id];
-
-      let rejectionCount = 0;
-      let rejectionTime = 0;
-
-      if (rejectData) {
-        try {
-          const parsed = JSON.parse(rejectData);
-          rejectionCount = parsed.count || 0;
-          rejectionTime = parsed.time || 0;
-        } catch {}
-      }
-
-      if (rejectionCount >= 3 && Date.now() - rejectionTime < 60000) {
-        return null; // 🚫 hard skip
-      }
-
-      return {
-        driver,
-        ...eta,
-        rejectionCount,
-        rejectionTime,
-      };
-    })
-    .filter(Boolean);
-
-  // =====================================================
-  // ❌ NO VALID DRIVERS AFTER ETA
+  // ❌ NO VALID DRIVERS
   // =====================================================
   if (!enriched.length) {
-    console.log("⚠️ No enriched drivers → fallback to raw drivers");
-
-    return {
-      driverIds,
-      radius,
-    };
+    console.log("⚠️ No valid drivers after filtering");
+    return { driverIds: [], radius, source };
   }
 
   // =====================================================
-  // 🔥 RECOVERY MODE FILTER (IMPORTANT)
+  // 🔥 RECOVERY MODE PRIORITY
   // =====================================================
   let finalDrivers = enriched;
 
   if (isRecovery) {
-    // Prefer fresh drivers (less rejected recently)
-    finalDrivers = enriched.filter((d) => d.rejectionCount === 0);
-
-    if (!finalDrivers.length) {
-      finalDrivers = enriched; // fallback
-    }
+    const fresh = enriched.filter((d) => d.rejectionCount === 0);
+    if (fresh.length) finalDrivers = fresh;
   }
 
   // =====================================================
-  // 6️⃣ RANK DRIVERS
+  // 📊 SCORE + RANK
   // =====================================================
   const scoreMap = await getDriverScores(
     finalDrivers.map((d) => d.driver._id.toString()),
@@ -204,9 +186,6 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
     }))
     .sort((a, b) => a.score - b.score);
 
-  // =============================
-  // 🧠 DEBUG LOG
-  // =============================
   console.log("⚡ FAST RANKING MODE");
 
   ranked.forEach((d, i) => {
@@ -215,8 +194,29 @@ export async function findBestDrivers({ pickupLat, pickupLng, rideId }) {
     );
   });
 
+  // =====================================================
+  // 🔒 FINAL SAFETY FILTER
+  // =====================================================
+  const finalIds = ranked.map((d) => d.driver._id.toString());
+ 
+  const safeDrivers = finalIds.filter((id) => {
+    const rejectData = rejectedMap[id];
+    if (!rejectData) return true;
+
+    try {
+      const { count, time } = JSON.parse(rejectData);
+
+      if (count >= 2) return false;
+      if (Date.now() - time < 10000) return false;
+
+      return true;
+    } catch {
+      return true;
+    }
+  });
   return {
-    driverIds: ranked.map((d) => d.driver._id.toString()),
+    driverIds: safeDrivers,
     radius,
+    source,
   };
 }

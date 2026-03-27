@@ -1,3 +1,5 @@
+// /src/modules/lock/lock.redis.js
+
 import redis from "../../config/redis.js";
 import { safeRedis } from "../geo/geo.redis.js";
 
@@ -97,6 +99,4 @@ export async function releaseLockIfOwner(rideId, driverId) {
     () => redis.del(rideLockKey(rideId), driverLockKey(driverId)),
     "SAFE_RELEASE",
   );
-
-  console.log("🔓 Lock released safely:", { rideId, driverId });
 }

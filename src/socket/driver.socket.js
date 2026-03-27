@@ -218,9 +218,15 @@ export default function registerDriverHandlers(socket) {
     }).catch(() => {});
 
     // 🔥 SINGLE SOURCE OF TRUTH (Redis state + TTL)
-    const state = (await getDriverState(driverId)) || "searching";
+    const state = await getDriverState(driverId);
 
-    await setDriverState(driverId, state).catch(() => {});
+    // ✅ Only write if VALID
+    if (["searching", "arrived", "to_pickup", "on_trip"].includes(state)) {
+      await setDriverState(driverId, state);
+    } else {
+      console.log("⚠️ Invalid state detected, resetting → searching", state);
+      await setDriverState(driverId, "searching");
+    }
     // inside heartbeat
     await redis.set(GEO_TTL_PREFIX + driverId, "1", {
       EX: GEO_TTL_SECONDS,

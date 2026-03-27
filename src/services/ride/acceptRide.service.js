@@ -19,6 +19,7 @@ import {
   verifyLockOwnership,
   releaseLockIfOwner,
 } from "../../modules/lock/lock.redis.js";
+import { assignDriverToRide } from "../../modules/ride/ride.redis.js";
 
 export async function acceptRideService({ rideId, driverId }) {
   const requestStart = Date.now();
@@ -97,6 +98,9 @@ export async function acceptRideService({ rideId, driverId }) {
       throw new Error("Ride already accepted");
     }
 
+    // 🔥 ADD THIS (CRITICAL)
+    await assignDriverToRide(rideId.toString(), driverId);
+
     // =====================================================
     // 🚗 UPDATE DRIVER
     // =====================================================
@@ -116,8 +120,13 @@ export async function acceptRideService({ rideId, driverId }) {
     await trackAccept(driverId, responseTime);
 
     const metrics = await getMetrics(driverId);
-    await updateDriverScore(driverId, metrics);
+    const score =
+      (metrics.accepts || 0) * 10 -
+      (metrics.rejects || 0) * 5 -
+      (metrics.cancels || 0) * 8 -
+      (metrics.avgResponseTime || 0) * 0.01;
 
+    await updateDriverScore(driverId, score);
     // =====================================================
     // 🔥 CANCEL RECOVERY
     // =====================================================

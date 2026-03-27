@@ -1,102 +1,85 @@
 // /src/modules/dispatch/dispatch.service.js
 
 import Ride from "../../models/Ride.js";
+import { addDispatchJob } from "../../queues/dispatch.queue.js";
 import { findBestDrivers } from "../../services/dispatch/dispatchEngine.js";
 import { getIO, onlineDrivers } from "../../socket/index.js";
-import { isDriverLocked } from "../lock/lock.redis.js";
+import { getDriverState } from "../driverState/driverState.redis.js";
+import { createRideState, getRideState } from "../ride/ride.redis.js";
 import {
   getDispatch,
-  getRotation,
   initDispatch,
   markDriverNotified,
 } from "./dispatch.redis.js";
 
 // 🧠 Config
 const BATCHES = [2, 3, 5, 8]; // more attempts
-const RETRY_DELAYS = [8000, 12000, 15000, 20000];
-const activeDispatches = new Set();
-const dispatchTimers = new Map();
-
-function scheduleNextDispatch(rideId, context, delay) {
-  const timer = setTimeout(() => {
-    dispatchTimers.delete(rideId);
-    runDispatch(rideId, context);
-  }, delay);
-
-  dispatchTimers.set(rideId, timer);
-}
-
+const DISPATCH_MODE = process.env.DISPATCH_MODE || "CLI";
 // =====================================================
 // 🚀 ENTRY POINT
 // =====================================================
 export async function startDispatch(rideId) {
-  if (activeDispatches.has(rideId)) {
-    console.log("⚠️ Dispatch already running → skipping duplicate start");
+  console.log("\n🚀 START DISPATCH:", rideId);
+  console.log("⚙️ MODE:", DISPATCH_MODE);
+
+  const ride = await Ride.findById(rideId);
+
+  if (!ride) {
+    console.log("❌ Ride not found in runDispatch");
     return;
   }
 
-  activeDispatches.add(rideId);
-  console.log("🧠 ACTIVE DISPATCHES:", [...activeDispatches.keys()]);
+  if (!ride || ride.status !== "requested") return;
 
-  console.log("\n==============================");
-  console.log("🚀 DISPATCH STARTED");
-  console.log("Ride:", rideId);
-  console.log("==============================\n");
+  await createRideState(ride);
+  await initDispatch(rideId.toString());
 
-  try {
-    const ride = await Ride.findById(rideId);
+  const context = { attempt: 0, lastNotifiedAt: {} };
 
-    if (ride.status !== "requested") {
-      console.log("🛑 Ride already handled → stopping dispatch");
-      activeDispatches.delete(rideId);
-      return;
-    }
-
-    if (ride && ["completed", "cancelled"].includes(ride.status)) {
-      console.log("🧹 Clearing stale recovery flag");
-      ride.recovery = null;
-      await ride.save();
-    }
-
-    if (ride.recovery) {
-      console.log("🧠 Starting dispatch in recovery mode");
-    }
-
-    const rideKey = rideId.toString();
-
-    await initDispatch(rideKey);
-
-    const context = {
-      attempt: 0,
-      lastNotifiedAt: new Map(),
-      rejectedCache: new Set(), // 🔥 ADD THIS
-    };
-
+  if (DISPATCH_MODE === "WORKER") {
+    console.log("📥 Sending to queue...");
+    await addDispatchJob({ rideId, context });
+  } else {
+    console.log("🧪 Running CLI mode...");
     await runDispatch(rideId, context);
-  } catch (error) {
-    console.log("Dispatch error: ", error.message);
   }
 }
 
 // =====================================================
 // 🔁 MAIN DISPATCH LOOP
 // =====================================================
-async function runDispatch(rideId, context) {
-  if (!activeDispatches.has(rideId)) {
-    console.log("🛑 Dispatch not active → skipping");
-    return;
-  }
-
+export async function runDispatch(rideId, context) {
   try {
+    const io = getIO();
+
     console.log("\n------------------------------");
     console.log(`🔁 Dispatch Attempt ${context.attempt + 1}`);
     console.log("------------------------------");
 
-    const ride = await Ride.findById(rideId);
+    // ✅ Mongo ONLY for static data (NOT control)
+    const ride = await Ride.findById(rideId).select(
+      "pickupLocation dropLocation recovery fare customer passengerCount",
+    );
 
-    if (!ride) return;
-    if (ride.status !== "requested") {
-      console.log("🛑 Dispatch stopped:", ride.status);
+    // ✅ Redis is PRIMARY now
+    const redisRide = await getRideState(rideId.toString());
+
+    console.log("🧠 [REDIS CONTROL]:", {
+      status: redisRide?.status,
+      driverId: redisRide?.driverId,
+    });
+
+    if (!redisRide) {
+      console.log("⚠️ Redis missing ride → fallback to Mongo");
+
+      const fallbackRide = await Ride.findById(rideId);
+
+      if (!fallbackRide || fallbackRide.status !== "requested") {
+        console.log("🛑 Fallback Mongo stop:", fallbackRide?.status);
+        return;
+      }
+    } else if (redisRide.status !== "SEARCHING") {
+      console.log("🛑 Redis says stop dispatch:", redisRide.status);
       return;
     }
 
@@ -115,16 +98,18 @@ async function runDispatch(rideId, context) {
     // =============================
     // 🚀 FIND DRIVERS
     // =============================
-    const { driverIds } = await findBestDrivers({
+    const { drivers } = await findBestDrivers({
       pickupLat: ride.pickupLocation.coordinates[1],
       pickupLng: ride.pickupLocation.coordinates[0],
       rideId: rideId.toString(),
     });
 
-    console.log("🚗 Found drivers:", driverIds);
+    const driverIds = drivers.map((d) => d.id);
 
-    const io = getIO();
-    if (!io) return;
+    console.log("🚗 Found drivers:", driverIds);
+    console.log("📊 Ranked drivers:", drivers);
+
+    console.log("🚗 Found drivers:", driverIds);
 
     const rideKey = rideId.toString();
 
@@ -141,20 +126,15 @@ async function runDispatch(rideId, context) {
 
     console.log("🧠 REDIS STATE (initial):", state);
 
-    // =============================
-    // 🔥 BUILD REJECTED MAP
-    // =============================
-    const rejectedMap = state?.rejectedDrivers || {};
-
     const eligibleDrivers = [];
 
     for (const driverId of driverIds) {
       console.log("\n🔍 Checking driver:", driverId);
 
-      const socketId = onlineDrivers.get(driverId);
+      const driverState = await getDriverState(driverId);
 
-      if (!socketId && !isRecovery) {
-        console.log("❌ Skip (offline)");
+      if (driverState !== "searching" && !isRecovery) {
+        console.log("❌ Skip (not available in Redis):", driverId);
         continue;
       }
 
@@ -182,8 +162,16 @@ async function runDispatch(rideId, context) {
     let sent = 0;
 
     for (const driverId of eligibleDrivers) {
-      const socketId = onlineDrivers.get(driverId);
-      if (!socketId) continue;
+      let socketId = null;
+
+      if (DISPATCH_MODE === "CLI") {
+        socketId = onlineDrivers.get(driverId);
+
+        if (!socketId && !isRecovery) {
+          console.log("❌ Skip (no socket - CLI only):", driverId);
+          continue;
+        }
+      }
 
       // =============================
       // 🔥 FINAL SAFETY CHECK (CRITICAL FIX)
@@ -198,15 +186,19 @@ async function runDispatch(rideId, context) {
 
       console.log("📡 Dispatch →", driverId);
 
-      io.to(socketId).emit("new-ride", {
-        ...(ride.toObject ? ride.toObject() : ride),
-        dispatchAttempt: context.attempt + 1,
-        isRecovery,
-      });
+      if (DISPATCH_MODE === "CLI" && io && socketId) {
+        io.to(socketId).emit("new-ride", {
+          ...(ride.toObject ? ride.toObject() : ride),
+          dispatchAttempt: context.attempt + 1,
+          isRecovery,
+        });
+      } else if (DISPATCH_MODE === "WORKER") {
+        console.log("📨 Worker selected driver (no socket emit):", driverId);
+      }
 
       await markDriverNotified(rideKey, driverId);
 
-      context.lastNotifiedAt.set(driverId, Date.now());
+      context.lastNotifiedAt[driverId] = Date.now();
 
       sent++;
       if (sent >= batchSize) break;
@@ -214,19 +206,30 @@ async function runDispatch(rideId, context) {
 
     console.log("✅ Drivers notified:", sent);
 
+    const latestRedisRide = await getRideState(rideId.toString());
+
+    if (!latestRedisRide || latestRedisRide.status !== "SEARCHING") {
+      console.log("🛑 Stop dispatch (Redis):", latestRedisRide?.status);
+      return;
+    }
+
     context.attempt++;
 
-    const latestRide = await Ride.findById(rideId);
-    if (!latestRide || latestRide.status !== "requested") return;
+    if (DISPATCH_MODE === "WORKER") {
+      console.log("🔁 Requeueing job...");
+      await addDispatchJob({ rideId, context });
+    } else {
+      console.log("🔁 CLI retry...");
+      setTimeout(() => {
+        runDispatch(rideId, context);
+      }, 8000);
+    }
 
-    const nextDelay =
-      sent === 0
-        ? 10000
-        : RETRY_DELAYS[Math.min(context.attempt, RETRY_DELAYS.length - 1)];
-
-    console.log(`⏳ Next retry in ${nextDelay / 1000}s`);
-
-    scheduleNextDispatch(rideId, context, nextDelay);
+    if (DISPATCH_MODE === "WORKER") {
+      console.log("🔁 Job requeued (WORKER)");
+    } else {
+      console.log("🔁 Retry scheduled (CLI)");
+    }
   } catch (err) {
     console.log("❌ DISPATCH LOOP ERROR:", err.message);
   }
@@ -273,14 +276,6 @@ async function cancelRide(ride) {
     await recheckRide.save();
 
     console.log("❌ Ride marked as CANCELLED");
-    // 🔥 STOP ANY FUTURE DISPATCH LOOPS
-    const timer = dispatchTimers.get(ride._id.toString());
-
-    if (timer) {
-      clearTimeout(timer);
-      dispatchTimers.delete(ride._id.toString());
-      console.log("🛑 Dispatch timer cleared");
-    }
 
     // =====================================================
     // 4️⃣ CLEAR REDIS DISPATCH
@@ -333,7 +328,7 @@ async function cancelRide(ride) {
       reason: recheckRide.cancelReason,
       time: new Date().toISOString(),
     });
-    activeDispatches.delete(ride._id.toString());
+
     console.log("\n==============================");
     console.log("🚦 DISPATCH ENDED (CANCELLED)");
     console.log("==============================\n");
